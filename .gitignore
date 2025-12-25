@@ -32,8 +32,4 @@ __pycache__/
 SmartTGDownloader.exe
 read_crash_log.py
 GEMINI.md
-
-# =========================
-# KEEP THIS FILE TRACKED
-# =========================
-!test.py
+test.py
