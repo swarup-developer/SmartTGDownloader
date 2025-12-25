@@ -1,0 +1,39 @@
+# =========================
+# Python virtual environment
+# =========================
+venv/
+.venv/
+
+# =========================
+# Build / distribution artifacts
+# =========================
+audio.dist/
+audio.onefile-build/
+build/
+dist/
+*.spec
+
+# =========================
+# Executables
+# =========================
+*.exe
+
+# =========================
+# Cache / temp files
+# =========================
+__pycache__/
+*.pyc
+*.pyo
+*.log
+
+# =========================
+# Project-specific ignores
+# =========================
+SmartTGDownloader.exe
+read_crash_log.py
+GEMINI.md
+
+# =========================
+# KEEP THIS FILE TRACKED
+# =========================
+!test.py
