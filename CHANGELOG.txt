@@ -1,0 +1,62 @@
+SmartTG Downloader Changelog
+========================================================================
+Version: 1.0.1
+Build/Version Code: 2
+Release Date: June 16, 2026
+========================================================================
+
+SUMMARY OF CHANGES:
+This release introduces Android 13/17 permission flow crash fixes,
+modular settings configurations, list-view layouts for informational content,
+accessibility semantics enhancements, and Telegram connection self-healing DC routing.
+
+[ADDED]
+- ModularSettings: Divided settings into dedicated Account Settings, Network & Speed, and Storage & Folders screens.
+- Auto-Redirection: Permission screen auto-redirects directly to the welcome login screen on completion, and logged-in users are automatically redirected to the main shell, eliminating the need for a 'Continue' button.
+- Dynamic DC Migration: Added auto-healing routing for Telegram connection when encountering PHONE_MIGRATE errors.
+- Accessibility: Wrapped all 26+ unwrapped buttons and controls in Semantics widgets.
+- List Layouts: Converted Welcome features and Home usage instructions into clean ListView layouts.
+- Refactored Settings: Implemented a public refreshSettings wrapper to safely trigger provider state refreshes from external settings screens without invalid protected member access.
+- Proguard Optimization: Configured Play Core class warnings exclusion to support clean production APK minification and shrinking.
+
+[FIXED]
+- Android 13+ permission crash by adding READ_MEDIA_IMAGES, READ_MEDIA_VIDEO, and READ_MEDIA_AUDIO in manifest.
+- Resolved permission prompts skipping on startup by batch-requesting storage and notifications.
+- Settings shortcut cleaned from Recent tab AppBar to consolidate navigation.
+
+[VERIFICATION]
+- Unit & Widget Test Suites: 100% Passing.
+- Static Code Analysis: 100% Clean.
+========================================================================
+
+Version: 1.0.0
+Build/Version Code: 1
+Release Date: June 15, 2026
+========================================================================
+
+SUMMARY OF CHANGES:
+This release introduces mobile-friendly Telegram download functionality,
+a modern UI design, real MTProto authentication, a guided startup permission
+flow, and comprehensive lifecycle stability fixes.
+
+[ADDED]
+- Pluggable Telegram authentication backend using the recommended MTProto client transport.
+- Step-by-step connection feedback status tracker on the authentication layout.
+- Structured remote RPC error handling and mapped recovery prompts for account login.
+- Two-Factor Authentication (2FA) support including secure client SRP proof calculations.
+- Dedicated Permissions Screen during startup explaining storage and notification needs.
+- Android 13+ gallery access fallback to support modern storage permissions.
+- Premium visual styling for Home link analysis and Recent downloads tabs.
+- Search filters and category pill chips (Audio, Video, Images, Docs) in history.
+- Custom download speed throttling controls and Wi-Fi Guard mode in Settings.
+
+[FIXED]
+- Socket stream connection lifecycle crash by securely tracking and closing subscriptions.
+- Data encapsulation during account logout to prevent inconsistent local state.
+- Unreferenced navigation callback functions and redundant build settings.
+- Diagnostic compile warnings, type casts, and print statements in database systems.
+
+[VERIFICATION]
+- Unit & Widget Test Suites: 100% Passing.
+- Static Code Analysis: 100% Clean (0 Warnings, 0 Errors).
+========================================================================
