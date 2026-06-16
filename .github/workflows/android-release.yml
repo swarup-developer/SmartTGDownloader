@@ -48,10 +48,6 @@ jobs:
           cd android_flutter
           flutter pub get
 
-      - name: Build Android App Bundle (AAB)
-        run: |
-          cd android_flutter
-          flutter build appbundle --release
 
       - name: Build Split APKs (per ABI)
         run: |
