@@ -49,10 +49,10 @@ jobs:
           flutter pub get
 
 
-      - name: Build Split APKs (per ABI)
+      - name: Build Split APKs (ARM only)
         run: |
           cd android_flutter
-          flutter build apk --release --split-per-abi
+          flutter build apk --release --target-platform android-arm,android-arm64 --split-per-abi
 
       - name: Extract Release Notes
         run: |
@@ -67,7 +67,6 @@ jobs:
           files: |
             android_flutter/build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk
             android_flutter/build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
-            android_flutter/build/app/outputs/flutter-apk/app-x86_64-release.apk
           draft: false
           prerelease: false
         env:
