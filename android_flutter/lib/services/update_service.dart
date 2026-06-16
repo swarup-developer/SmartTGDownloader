@@ -21,7 +21,7 @@ class UpdateInfo {
 }
 
 class UpdateService {
-  static const String _repoUrl = 'https://api.github.com/repos/swarup-developer/SmartTGDownloader/releases/latest';
+  static const String _repoUrl = 'https://api.github.com/repos/swarup-developer/SmartTGDownloader/releases';
   static const MethodChannel _channel = MethodChannel('com.example.smart_tg_downloader/device_info');
 
   /// Checks if a new version is available on GitHub
@@ -35,43 +35,48 @@ class UpdateService {
 
       if (response.statusCode == 200) {
         final body = await response.transform(utf8.decoder).join();
-        final Map<String, dynamic> data = json.decode(body);
+        final dynamic decoded = json.decode(body);
 
-        final String tagName = data['tag_name'] ?? '';
-        final String bodyText = data['body'] ?? 'No release notes available.';
-        final List<dynamic> assets = data['assets'] ?? [];
+        if (decoded is List) {
+          for (var release in decoded) {
+            if (release is Map<String, dynamic>) {
+              final String tagName = release['tag_name'] ?? '';
+              final String bodyText = release['body'] ?? 'No release notes available.';
+              final List<dynamic> assets = release['assets'] ?? [];
 
-        // Expecting tag format like "v1.0.2-android"
-        final regExp = RegExp(r'^v(\d+\.\d+\.\d+)-android$');
-        final match = regExp.firstMatch(tagName);
+              // Expecting tag format like "v1.0.2-android"
+              final regExp = RegExp(r'^v(\d+\.\d+\.\d+)-android$');
+              final match = regExp.firstMatch(tagName);
 
-        if (match != null) {
-          final latestVer = match.group(1)!;
-          if (_isNewerVersion(latestVer, appVersionName)) {
-            // Find the asset that matches Android APK. Since we build split APKs, we can offer the generic or matching apk.
-            // Let's search for an asset ending with "-release.apk" or contains "apk".
-            String apkUrl = '';
-            for (var asset in assets) {
-              final String name = asset['name'] ?? '';
-              if (name.endsWith('.apk')) {
-                // If there's an ABI specific APK, we can return it.
-                // For simplicity, we return the first APK we find, or the user can get it from the browser.
-                // We'll prioritize arm64-v8a since it's the most common target.
-                apkUrl = asset['browser_download_url'] ?? '';
-                if (name.contains('arm64-v8a')) {
-                  break; // Prefer arm64-v8a
+              if (match != null) {
+                final latestVer = match.group(1)!;
+                if (_isNewerVersion(latestVer, appVersionName)) {
+                  String apkUrl = '';
+                  for (var asset in assets) {
+                    if (asset is Map<String, dynamic>) {
+                      final String name = asset['name'] ?? '';
+                      if (name.endsWith('.apk')) {
+                        apkUrl = asset['browser_download_url'] ?? '';
+                        if (name.contains('arm64-v8a')) {
+                          break; // Prefer arm64-v8a
+                        }
+                      }
+                    }
+                  }
+
+                  if (apkUrl.isNotEmpty) {
+                    return UpdateInfo(
+                      hasUpdate: true,
+                      latestVersion: latestVer,
+                      currentVersion: appVersionName,
+                      whatsNew: bodyText,
+                      downloadUrl: apkUrl,
+                    );
+                  }
                 }
+                // Stop checking once we find the first (latest) Android release tag, even if it is not newer.
+                break;
               }
-            }
-
-            if (apkUrl.isNotEmpty) {
-              return UpdateInfo(
-                hasUpdate: true,
-                latestVersion: latestVer,
-                currentVersion: appVersionName,
-                whatsNew: bodyText,
-                downloadUrl: apkUrl,
-              );
             }
           }
         }

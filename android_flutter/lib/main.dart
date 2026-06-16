@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:smart_tg_downloader/providers/account_provider.dart';
 import 'package:smart_tg_downloader/providers/download_provider.dart';
+import 'package:smart_tg_downloader/screens/main_shell.dart';
 import 'package:smart_tg_downloader/screens/welcome_screen.dart';
 import 'package:smart_tg_downloader/services/storage_service.dart';
 
@@ -28,6 +29,9 @@ class SmartTGDownloaderApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Check if user is already logged in on startup
+    final isLoggedIn = Provider.of<AccountProvider>(context, listen: false).isLoggedIn;
+
     return MaterialApp(
       title: 'Smart TG Downloader',
       debugShowCheckedModeBanner: false,
@@ -63,7 +67,7 @@ class SmartTGDownloaderApp extends StatelessWidget {
           indicatorColor: const Color(0xFF6C63FF).withOpacity(0.2),
         ),
       ),
-      home: const WelcomeScreen(),
+      home: isLoggedIn ? const MainShell() : const WelcomeScreen(),
     );
   }
 }

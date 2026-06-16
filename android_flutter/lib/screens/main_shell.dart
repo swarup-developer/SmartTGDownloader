@@ -7,6 +7,8 @@ import 'package:smart_tg_downloader/screens/recent_tab.dart';
 import 'package:smart_tg_downloader/screens/settings_screen.dart';
 import 'package:smart_tg_downloader/screens/welcome_screen.dart';
 import 'package:smart_tg_downloader/services/storage_service.dart';
+import 'package:smart_tg_downloader/services/update_service.dart';
+import 'package:smart_tg_downloader/widgets/update_dialog.dart';
 
 class MainShell extends StatefulWidget {
   const MainShell({super.key});
@@ -23,6 +25,17 @@ class _MainShellState extends State<MainShell> {
     const RecentTab(),
     const SettingsScreen(),
   ];
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      final info = await UpdateService.checkForUpdates();
+      if (mounted && info.hasUpdate) {
+        UpdateDialog.show(context, info);
+      }
+    });
+  }
 
   @override
   Widget build(BuildContext context) {

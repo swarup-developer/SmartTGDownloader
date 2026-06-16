@@ -58,25 +58,17 @@ jobs:
           cd android_flutter
           flutter build apk --release --split-per-abi
 
+      - name: Extract Release Notes
+        run: |
+          python .github/workflows/extract_changelog.py ${{ env.VERSION_NAME }}
+
       - name: Create and Upload GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ env.VERSION_NAME }}-android
           name: SmartTG Downloader Android v${{ env.VERSION_NAME }}
-          body: |
-            ## SmartTG Downloader Android Release v${{ env.VERSION_NAME }} (Build ${{ env.VERSION_CODE }})
-            
-            This is an automated release of the Android client.
-            
-            ### Architecture-Specific Builds
-            Choose the build matching your device's architecture for the smallest download size:
-            - **ARM64 (64-bit phones)**: `app-arm64-v8a-release.apk`
-            - **ARMv7 (32-bit older phones)**: `app-armeabi-v7a-release.apk`
-            - **x86_64 (Emulators/tablets)**: `app-x86_64-release.apk`
-            
-            *Alternatively, the Google Play version automatically serves the optimized build from the `app-release.aab` bundle.*
+          body_path: release_notes.txt
           files: |
-            android_flutter/build/app/outputs/bundle/release/app-release.aab
             android_flutter/build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk
             android_flutter/build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
             android_flutter/build/app/outputs/flutter-apk/app-x86_64-release.apk
