@@ -344,6 +344,15 @@ class TelegramWorker:
         return False
 
     async def connect_and_send_code(self, api_id, api_hash, phone):
+        # Check active internet connection first
+        import socket
+        try:
+            socket.setdefaulttimeout(3)
+            socket.gethostbyname("api.github.com")
+        except socket.error:
+            self.update_gui("No active internet connection. Please check your network and try again.", True)
+            return "ERROR"
+
         try:
             proxy = self.get_proxy_args()
             self.client = TelegramClient(self.session_file, api_id, api_hash, proxy=proxy, **DEVICE_INFO)

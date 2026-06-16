@@ -82,33 +82,82 @@ class RealTelegramAuthService implements TelegramAuthService {
   @override
   String? get generatedCode => null; // Real client does not expose/know code
 
+  Future<bool> _checkNetworkStatus() async {
+    final domains = ['api.github.com', 'one.one.one.one', 'google.com'];
+    for (final domain in domains) {
+      try {
+        final result = await InternetAddress.lookup(domain).timeout(const Duration(seconds: 3));
+        if (result.isNotEmpty && result.first.rawAddress.isNotEmpty) {
+          return true;
+        }
+      } catch (_) {
+        // continue checking
+      }
+    }
+    return false;
+  }
+
+  Future<void> _connectToDc(String ip) async {
+    final rawSocket = await Socket.connect(ip, 443, timeout: const Duration(seconds: 8));
+    final obfuscation = Obfuscation.random(false, 4);
+    rawSocket.add(obfuscation.preamble);
+    await rawSocket.flush();
+
+    _socket = TelegramSocket(rawSocket);
+    _socket!.onClose = () {
+      _isConnected = false;
+      _client = null;
+    };
+    final idGenerator = MessageIdGenerator();
+
+    final authKey = await Client.authorize(_socket!, obfuscation, idGenerator);
+
+    _client = Client(
+      socket: _socket!,
+      obfuscation: obfuscation,
+      authorizationKey: authKey,
+      idGenerator: idGenerator,
+    );
+    _isConnected = true;
+  }
+
   @override
   Future<void> connect() async {
     if (_isConnected) return;
+
+    final hasNetwork = await _checkNetworkStatus();
+    if (!hasNetwork) {
+      throw Exception("NO_INTERNET_CONNECTION");
+    }
+
+    bool success = false;
+    Object? lastError;
+
     try {
-      final rawSocket = await Socket.connect(_currentDcIp, 443, timeout: const Duration(seconds: 10));
-      final obfuscation = Obfuscation.random(false, 4);
-      rawSocket.add(obfuscation.preamble);
-      await rawSocket.flush();
-
-      _socket = TelegramSocket(rawSocket);
-      _socket!.onClose = () {
-        _isConnected = false;
-        _client = null;
-      };
-      final idGenerator = MessageIdGenerator();
-
-      final authKey = await Client.authorize(_socket!, obfuscation, idGenerator);
-
-      _client = Client(
-        socket: _socket!,
-        obfuscation: obfuscation,
-        authorizationKey: authKey,
-        idGenerator: idGenerator,
-      );
-      _isConnected = true;
+      await _connectToDc(_currentDcIp);
+      success = true;
     } catch (e) {
+      lastError = e;
+      
+      // Fallback to other DCs if the primary one fails
+      final fallbackDcIds = [4, 2, 1, 3, 5];
+      for (final dcId in fallbackDcIds) {
+        final ip = _getIpForDc(dcId);
+        if (ip == _currentDcIp) continue;
+        try {
+          await _connectToDc(ip);
+          _currentDcIp = ip;
+          success = true;
+          break;
+        } catch (err) {
+          lastError = err;
+        }
+      }
+    }
+
+    if (!success) {
       _isConnected = false;
+      debugPrint("Telegram connection failed: $lastError");
       throw Exception("CONNECTION_FAILED");
     }
   }

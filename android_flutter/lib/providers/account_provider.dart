@@ -226,7 +226,9 @@ class AccountProvider with ChangeNotifier {
       _isLoading = false;
       _status = LoginStatus.failed;
       final errorStr = e.toString();
-      if (errorStr.contains('PHONE_NUMBER_INVALID')) {
+      if (errorStr.contains('NO_INTERNET_CONNECTION')) {
+        _loginError = 'No active internet connection detected. Please check your network and try again.';
+      } else if (errorStr.contains('PHONE_NUMBER_INVALID')) {
         _loginError = 'The phone number is invalid. Please check the format and try again.';
       } else if (errorStr.contains('FLOOD_WAIT')) {
         _loginError = 'Rate limit exceeded. Please wait a few minutes before trying again.';
@@ -276,6 +278,16 @@ class AccountProvider with ChangeNotifier {
         SemanticsService.announce('Two factor authorization password required', TextDirection.ltr);
         notifyListeners();
         return true;
+      } else if (errorStr.contains('NO_INTERNET_CONNECTION')) {
+        _status = LoginStatus.failed;
+        _loginError = 'No active internet connection detected. Please check your network and try again.';
+        notifyListeners();
+        return false;
+      } else if (errorStr.contains('CONNECTION_FAILED')) {
+        _status = LoginStatus.failed;
+        _loginError = 'Failed to connect to Telegram servers. Please check your internet connection.';
+        notifyListeners();
+        return false;
       } else if (errorStr.contains('PHONE_CODE_INVALID')) {
         _status = LoginStatus.failed;
         _loginError = 'Invalid verification code. Please check the code sent to your device.';
@@ -325,6 +337,10 @@ class AccountProvider with ChangeNotifier {
       final errorStr = e.toString();
       if (errorStr.contains('PASSWORD_HASH_INVALID')) {
         _loginError = 'Invalid Telegram 2FA password. Please try again.';
+      } else if (errorStr.contains('NO_INTERNET_CONNECTION')) {
+        _loginError = 'No active internet connection detected. Please check your network and try again.';
+      } else if (errorStr.contains('CONNECTION_FAILED')) {
+        _loginError = 'Failed to connect to Telegram servers. Please check your internet connection.';
       } else {
         _loginError = 'Error: ${errorStr.replaceAll('Exception: ', '')}';
       }

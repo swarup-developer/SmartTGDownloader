@@ -7,7 +7,6 @@ import 'package:smart_tg_downloader/screens/recent_tab.dart';
 import 'package:smart_tg_downloader/screens/settings_screen.dart';
 import 'package:smart_tg_downloader/screens/welcome_screen.dart';
 import 'package:smart_tg_downloader/services/storage_service.dart';
-import 'package:smart_tg_downloader/widgets/account_switcher_sheet.dart';
 
 class MainShell extends StatefulWidget {
   const MainShell({super.key});
@@ -29,7 +28,6 @@ class _MainShellState extends State<MainShell> {
   Widget build(BuildContext context) {
     final accountProvider = Provider.of<AccountProvider>(context);
     final downloadProvider = Provider.of<DownloadProvider>(context);
-    final activeAccount = accountProvider.activeAccount;
     
     // Redirect to WelcomeScreen if logged out
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -42,9 +40,6 @@ class _MainShellState extends State<MainShell> {
       }
     });
     
-    final bool showWifiWarning = !downloadProvider.mockWifiConnected && 
-        StorageServiceWifiCheck.isWifiGuardEnabled(context);
-
     return Scaffold(
       backgroundColor: const Color(0xFF12141C),
       appBar: AppBar(
@@ -125,36 +120,7 @@ class _MainShellState extends State<MainShell> {
               ),
             ),
 
-          // Banner warning when Wi-Fi only mode is on and Wifi is simulated disconnected
-          if (showWifiWarning)
-            Container(
-              color: const Color(0xFFD32F2F),
-              width: double.infinity,
-              padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 16),
-              child: Row(
-                children: [
-                  const Icon(Icons.wifi_off, color: Colors.white, size: 18),
-                  const SizedBox(width: 8),
-                  const Expanded(
-                    child: Text(
-                      'Downloads paused: Waiting for Wi-Fi (Wi-Fi Guard on)',
-                      style: TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold),
-                    ),
-                  ),
-                  TextButton(
-                    onPressed: () {
-                      downloadProvider.setMockWifiConnected(true);
-                    },
-                    style: TextButton.styleFrom(
-                      foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(horizontal: 12),
-                      backgroundColor: Colors.white.withOpacity(0.2),
-                    ),
-                    child: const Text('Connect Mock Wi-Fi', style: TextStyle(fontSize: 10)),
-                  ),
-                ],
-              ),
-            ),
+
           
           Expanded(child: _tabs[_currentIndex]),
         ],

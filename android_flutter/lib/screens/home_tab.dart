@@ -98,18 +98,12 @@ class _HomeTabState extends State<HomeTab> {
                   // DOWNLOAD INPUT SECTION
                   _buildLinkInputCard(context, dp),
                   const SizedBox(height: 20),
-                  
-                  // MOCK CONTROLLER CARD (FOR TESTING WIFI GUARD AND SPEED LIMITS IN PROTOTYPE)
-                  _buildMockEnvironmentControls(context, dp),
-                  const SizedBox(height: 20),
 
                   // ACTIVE DOWNLOAD PROGRESS MONITOR
                   if (activeDownload != null)
                     _buildActiveDownloadCard(context, dp, activeDownload)
                   else if (dp.activeQueue.isNotEmpty)
                     _buildQueueStatusCard(context, dp),
-                  const SizedBox(height: 20),
-                  _buildStepsCard(context),
                 ],
               ],
             ),
@@ -494,128 +488,6 @@ class _HomeTabState extends State<HomeTab> {
                   )
                 : null,
           ),
-        ),
-      ),
-    );
-  }
-
-  // MOCK ENVIRONMENT CONTROLLERS FOR EMULATOR DEMO
-  Widget _buildMockEnvironmentControls(BuildContext context, DownloadProvider dp) {
-    return Container(
-      decoration: BoxDecoration(
-        color: const Color(0xFF1B1E2B).withOpacity(0.4),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: Colors.white.withOpacity(0.04), width: 1),
-      ),
-      child: Semantics(
-        label: 'Simulate Wi-Fi Connection switch',
-        hint: 'Double tap to toggle mock Wi-Fi status for testing the Wi-Fi guard feature',
-        child: SwitchListTile(
-          secondary: Container(
-            padding: const EdgeInsets.all(6),
-            decoration: BoxDecoration(
-              color: const Color(0xFF8B80FF).withOpacity(0.1),
-              borderRadius: BorderRadius.circular(8),
-            ),
-            child: const Icon(Icons.wifi_tethering_rounded, color: Color(0xFF8B80FF), size: 18),
-          ),
-          title: const Text(
-            'Simulate Wi-Fi Connection',
-            style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.w500),
-          ),
-          subtitle: const Text(
-            'Toggle to test Wi-Fi Guard speed-limiters',
-            style: TextStyle(color: Colors.white30, fontSize: 10),
-          ),
-          value: dp.mockWifiConnected,
-          activeColor: const Color(0xFF8B80FF),
-          activeTrackColor: const Color(0xFF8B80FF).withOpacity(0.3),
-          inactiveThumbColor: Colors.grey[400],
-          inactiveTrackColor: Colors.white12,
-          onChanged: (val) {
-            dp.setMockWifiConnected(val);
-          },
-        ),
-      ),
-    );
-  }
-
-  Widget _buildStepsCard(BuildContext context) {
-    final steps = [
-      {
-        'step': '1',
-        'title': 'Copy Telegram Link',
-        'desc': 'Find a public Telegram message or channel post and copy its shareable link.',
-      },
-      {
-        'step': '2',
-        'title': 'Paste & Scan',
-        'desc': 'Paste the link in the input field above and click Scan & Download.',
-      },
-      {
-        'step': '3',
-        'title': 'Download Media',
-        'desc': 'Select the files you want to download from the popup sheet and track progress.',
-      },
-    ];
-
-    return Card(
-      color: const Color(0xFF1B1E2B),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-      child: Padding(
-        padding: const EdgeInsets.all(20.0),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              'How to Download',
-              style: TextStyle(
-                color: Colors.white,
-                fontSize: 16,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-            const SizedBox(height: 12),
-            ListView.separated(
-              shrinkWrap: true,
-              physics: const NeverScrollableScrollPhysics(),
-              itemCount: steps.length,
-              separatorBuilder: (context, index) => const Divider(color: Colors.white12, height: 16),
-              itemBuilder: (context, index) {
-                final item = steps[index];
-                return Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    CircleAvatar(
-                      radius: 10,
-                      backgroundColor: const Color(0xFF6C63FF),
-                      child: Text(
-                        item['step']!,
-                        style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.bold),
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            item['title']!,
-                            style: const TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold),
-                          ),
-                          const SizedBox(height: 2),
-                          Text(
-                            item['desc']!,
-                            style: TextStyle(color: Colors.grey[400], fontSize: 11),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                );
-              },
-            ),
-          ],
         ),
       ),
     );
