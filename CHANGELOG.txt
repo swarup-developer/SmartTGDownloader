@@ -1,5 +1,32 @@
 SmartTG Downloader Changelog
 ========================================================================
+Version: 1.0.2 / 8.7.1
+Build/Version Code: 3 / 8.7.1
+Release Date: June 16, 2026
+========================================================================
+
+SUMMARY OF CHANGES:
+This release introduces a fully automated GitHub CI/CD workflow,
+fixes a critical Telegram verification login hang bug, implements a mandatory
+in-app update check and installer system for both Android and Windows platforms,
+and reorganizes the Git repository branch structures.
+
+[ADDED]
+- GitHub CI/CD Actions: Created separate, automatic release workflows for Windows (Nuitka compilation) and Android (App Bundle AAB and 3-ABI splits APK packaging) triggered on branch pushes.
+- Mandatory In-App Update (Android): Startup check against GitHub Releases API, modal update dialog with release notes, and background downloader with MethodChannel-launched system package installer.
+- Mandatory In-App Update (Windows): wxPython update dialog, background file downloader, and self-replacing batch script sequence to swap binary and auto-restart.
+- Clean Git Setup: Consolidated remote repository link and structured branches (main, windows, android) matching the modular folder layout.
+
+[FIXED]
+- Telegram login verification hang on Android: Added onClose socket connection resets to prevent dead socket reuses, along with a 15-second API invoke timeout safety net.
+- Windows build script CI compatibility: Patched build.bat to bypass pause commands during GitHub Action runners.
+- Clean Root Directory: Merged remote history while purging redundant/old duplicate root files, keeping the workspace structured.
+
+[VERIFICATION]
+- Unit & Widget Test Suites: 100% Passing.
+- Static Code Analysis: 100% Clean.
+- CI/CD Builds: Active workflows verified on remote branch pushes.
+========================================================================
 Version: 1.0.1
 Build/Version Code: 2
 Release Date: June 16, 2026
