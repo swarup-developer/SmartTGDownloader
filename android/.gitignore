@@ -1,0 +1,26 @@
+# Gradle
+.gradle/
+build/
+
+# Local configuration
+local.properties
+
+# Release signing (never commit)
+keystore.jks
+keystore.properties
+
+# IntelliJ / Android Studio
+.idea/
+*.iml
+*.ipr
+*.iws
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Misc
+*.log
+.DS_Store
+
+# Local credentials (never commit)
+gradle.properties

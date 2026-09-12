@@ -1,0 +1,13 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Paper-plane download mark -->
+    <path
+        android:fillColor="#6C63FF"
+        android:pathData="M54,22 L82,40 L74,78 L34,78 L26,40 Z M54,34 L60,52 L54,48 L48,52 Z" />
+    <path
+        android:fillColor="#8B80FF"
+        android:pathData="M44,58 L50,58 L50,64 L44,64 Z M52,58 L58,58 L58,64 L52,64 Z M60,58 L66,58 L66,64 L60,64 Z" />
+</vector>

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- Matches context.getExternalFilesDir(null) roots, where downloads live:
+         downloads/<source>/<category>/<file> -->
+    <external-files-path
+        name="downloads"
+        path="downloads/" />
+    <files-path
+        name="internal_downloads"
+        path="downloads/" />
+    <!-- Downloaded update APKs (cache/updates). -->
+    <cache-path
+        name="update_apks"
+        path="updates/" />
+</paths>

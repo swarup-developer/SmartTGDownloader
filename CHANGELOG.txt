@@ -1,5 +1,36 @@
 SmartTG Downloader Changelog
 ========================================================================
+Version: 2.1.0 / 8.8.0
+Build/Version Code: 5 / 8.8.0 (Android 2.1.0 / Windows 8.8.0)
+Release Date: September 12, 2026
+========================================================================
+
+SUMMARY OF CHANGES:
+Android adds live per-file download progress, release-APK signing via CI
+secrets, and a persisted download-history tab with open/re-download/filter.
+Windows v8.8.0 shipped the native-compiled lightweight build.
+
+[ADDED]
+- Android: live per-file download progress in the results sheet, driven by
+  TDLib's UpdateFile stream (per-row bars, per-file byte counters, overall
+  summary bar, completion checkmarks).
+- Android: release APK signing loaded from keystore.properties / CI secrets
+  (ANDROID_KEYSTORE_B64, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS,
+  ANDROID_KEY_PASSWORD) with a safe unsigned fallback.
+- Android: download history tab persisted with Room - completed downloads
+  survive restarts, with open-file (FileProvider) and re-download actions
+  plus filter chips by category or source channel.
+
+[CHANGED]
+- Windows packaging replaced Nuitka with Cython (.pyd compilation) +
+  PyInstaller onefile; released as v8.8.0 with a ~25 MB portable exe.
+
+[FIXED]
+- Windows build pipeline: uv sync now installs the build dependency group,
+  Cython 3.1 directive compatibility, versioned .pyd handling, and
+  absolute --add-data paths for PyInstaller.
+
+========================================================================
 Version: 2.0.0 / 8.8.0
 Build/Version Code: 4 / 8.8.0 (Android 2.0.0 / Windows 8.8.0)
 Release Date: September 11, 2026
