@@ -13,6 +13,8 @@ class TelegramWorker:
         self.stop_flag = False
         self.pause_flag = False
         self.pending_scan = None
+        self._scan_seq = 0
+        self._scan_token = None
         self.max_parallel_downloads = DOWNLOAD_BATCH_SIZE
         self.speed_limit_kbps = 0
         self.speed_limit_bps = 0
@@ -45,6 +47,22 @@ class TelegramWorker:
     def resume_downloads(self):
         self.pause_flag = False
         wx.CallAfter(self.progress_callback, "PAUSED_STATE", False, 0)
+
+    def next_scan_token(self):
+        """Invalidate any in-flight scan and mint a token for a new one."""
+        self._scan_seq += 1
+        self._scan_token = f"scan-{self._scan_seq}"
+        return self._scan_token
+
+    def is_scan_current(self, token):
+        """True only if this token belongs to the most recently requested scan."""
+        return token is not None and token == self._scan_token
+
+    def invalidate_scan(self):
+        """Drop any cached scan results and cancel any in-flight scan."""
+        self._scan_seq += 1
+        self._scan_token = f"scan-{self._scan_seq}"
+        self.pending_scan = None
 
     def apply_transfer_settings(self):
         cfg = load_settings()
@@ -344,14 +362,19 @@ class TelegramWorker:
         return False
 
     async def connect_and_send_code(self, api_id, api_hash, phone):
-        # Check active internet connection first
+        # Check active internet connection first.
+        # Probe a Telegram host (not GitHub) so VPN/proxy setups that block
+        # GitHub but allow Telegram are not falsely reported as offline.
         import socket
+        original_timeout = socket.getdefaulttimeout()
         try:
             socket.setdefaulttimeout(3)
-            socket.gethostbyname("api.github.com")
+            socket.gethostbyname("web.telegram.org")
         except socket.error:
             self.update_gui("No active internet connection. Please check your network and try again.", True)
             return "ERROR"
+        finally:
+            socket.setdefaulttimeout(original_timeout)
 
         try:
             proxy = self.get_proxy_args()
@@ -532,11 +555,21 @@ del "%~f0"
     async def analyze_link(self, link, filter_types):
         await self.scan_link(link, filter_types)
 
-    async def scan_link(self, link, filter_types):
+    async def scan_link(self, link, filter_types, scan_token=None):
         self.stop_flag = False
         self.pause_flag = False
 
+        if scan_token is None:
+            scan_token = self.next_scan_token()
+
         try:
+            # A newer scan has been requested while this one was queued:
+            # drop this stale run silently instead of caching old results.
+            if not self.is_scan_current(scan_token):
+                return
+
+            # Never let results from a previous link linger in the cache.
+            self.pending_scan = None
             if not self.client:
                 raise RuntimeError("Telegram client is not connected. Please log in first.")
             if not await self.client.is_user_authorized():
@@ -582,7 +615,7 @@ del "%~f0"
             else:
                 scanned = 0
                 async for msg in self.client.iter_messages(entity):
-                    if self.stop_flag:
+                    if self.stop_flag or not self.is_scan_current(scan_token):
                         break
                     scanned += 1
 
@@ -612,7 +645,12 @@ del "%~f0"
                         # Yield periodically to keep the event loop responsive and CPU spikes lower.
                         await asyncio.sleep(0)
 
+            # This scan was superseded by a newer one: do not report or cache it.
+            if not self.is_scan_current(scan_token):
+                return
+
             if self.stop_flag:
+                self.pending_scan = None
                 wx.CallAfter(self.progress_callback, "TASK_ABORTED", "Scan stopped.", 0)
                 return
 
@@ -621,6 +659,10 @@ del "%~f0"
             estimate_bps = self.speed_limit_bps if self.speed_limit_bps > 0 else 2 * 1024 * 1024
             estimate_seconds = int(total_size / estimate_bps) if estimate_bps > 0 else 0
             selected_keys = [item["key"] for item in matched_items]
+
+            # Final staleness check right before caching the results.
+            if not self.is_scan_current(scan_token):
+                return
 
             self.pending_scan = {
                 "title": title,
@@ -655,7 +697,9 @@ del "%~f0"
             wx.CallAfter(self.progress_callback, "SCAN_DONE", summary, 0)
 
         except Exception as e:
-            wx.CallAfter(self.progress_callback, "TASK_ABORTED", f"Error: {e}", 0)
+            # A superseded scan must not report errors for the new scan.
+            if self.is_scan_current(scan_token):
+                wx.CallAfter(self.progress_callback, "TASK_ABORTED", f"Error: {e}", 0)
 
     async def download_pending_scan(self, selected_keys=None):
         if not self.pending_scan or not self.pending_scan.get("items"):

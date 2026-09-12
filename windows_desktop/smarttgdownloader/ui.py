@@ -1174,7 +1174,7 @@ class MainFrame(wx.Frame):
                     removed += 1
             except Exception:
                 pass
-        self.worker.pending_scan = None
+        self.worker.invalidate_scan()
         return removed
 
     def _activate_and_connect(self, account):
@@ -1363,6 +1363,7 @@ class MainFrame(wx.Frame):
                 self.progress_dlg.Destroy()
                 self.progress_dlg = None
             self.lbl_status.SetLabel("Operation stopped.")
+            self.worker.pending_scan = None
             self.set_operation_mode("Ready", "Operation stopped")
             self.notify_user(str(data), is_error=True, toast=True)
             wx.CallLater(120, self.txt_link.SetFocus)
@@ -1396,6 +1397,9 @@ class MainFrame(wx.Frame):
         dlg.Destroy()
 
         if not selected_keys:
+            # Results were closed/cancelled: drop the cached scan so the
+            # next analyze never reuses it.
+            self.worker.invalidate_scan()
             self.lbl_status.SetLabel("Scan complete. Download cancelled.")
             self.notify_user("Scan complete. Download cancelled.")
             wx.CallLater(120, self.txt_link.SetFocus)
@@ -1498,7 +1502,10 @@ class MainFrame(wx.Frame):
             self.set_operation_mode("Analyzing", "Analyzing link")
             self.btn_open_folder.Hide()
             self.download_panel.Layout()
-            self.worker._run_task(self.worker.scan_link(link, selections))
+            # Mint a token that invalidates any previous in-flight scan and
+            # guarantees only this request can publish cached results.
+            scan_token = self.worker.next_scan_token()
+            self.worker._run_task(self.worker.scan_link(link, selections, scan_token))
             wx.CallLater(120, self.txt_link.SetFocus)
         d.Destroy()
 

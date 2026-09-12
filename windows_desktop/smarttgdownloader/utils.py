@@ -35,7 +35,7 @@ from telethon import TelegramClient, events, errors, types
 from telethon.tl.functions.messages import ImportChatInviteRequest, CheckChatInviteRequest
 from cryptography.fernet import Fernet
 
-CURRENT_VERSION = "8.7.0"
+CURRENT_VERSION = "8.8.0"
 DOWNLOAD_BATCH_SIZE = 4
 
 # --- Global Exception Handler ---

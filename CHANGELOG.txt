@@ -1,5 +1,54 @@
 SmartTG Downloader Changelog
 ========================================================================
+Version: 2.0.0 / 8.8.0
+Build/Version Code: 4 / 8.8.0 (Android 2.0.0 / Windows 8.8.0)
+Release Date: September 11, 2026
+========================================================================
+
+SUMMARY OF CHANGES:
+This release fixes a stale scan-cache bug on Windows and completely rebuilds
+the Android client natively in Kotlin + Jetpack Compose, removing Flutter.
+
+[ADDED]
+- Native Android app: rebuilt from scratch in Kotlin with Jetpack Compose
+  (Material 3), Coroutines/StateFlow architecture, and TDLib for Telegram.
+- TDLib integration: prebuilt native distribution (all ABIs) downloaded and
+  SHA-256-verified at build time - no NDK/CMake setup required.
+- Android scan pipeline: link analysis with monotonic scan tokens so results
+  from a previous link can never repopulate the results sheet.
+- Telegram API credentials are now injected via gradle.properties / CI
+  secrets instead of being embedded in source.
+
+[FIXED]
+- Windows stale scan cache: analyzing a second link could reuse the previous
+  scan's cached results; pending_scan is now invalidated on every new scan,
+  cancellation, and dialog close.
+- Windows scan race: concurrent scans are arbitrated by scan tokens so an
+  older scan can no longer overwrite or report for a newer request.
+- Windows offline check now probes a Telegram host instead of api.github.com,
+  so VPN/proxy users blocking GitHub are not falsely reported offline.
+- Download progress dialog stop action now drops cached scan results.
+
+[REMOVED]
+- Flutter Android client (android_flutter/), including all Dart code, Flutter
+  runner projects (linux/macos/web/windows), and pubspec-based dependencies.
+- Windows MSIX packaging script's Flutter/dart-msix dependency chain.
+
+[BUILD CHANGED - Windows]
+- Dropped Nuitka (2.8.9) and numpy from the build toolchain: Nuitka was
+  extremely heavy (long compiles, huge memory use, slow release pipeline).
+- New lightweight pipeline: Cython compiles all app modules
+  (utils/worker/ui) to native .pyd machine-code binaries, then PyInstaller
+  packages a single-file exe. No readable .py source or .pyc bytecode for
+  app modules ships in the released executable.
+
+[VERIFICATION]
+- Windows: Python syntax check clean on all modified modules.
+- Windows: local build of dist/SmartTGDownloader.exe verified.
+- Android: fresh Gradle project pinned to AGP 9.3.2 / Kotlin 2.4.20 /
+  Compose BOM 2026.09.00 / Gradle 9.7.1 (assembleDebug and assembleRelease
+  build successfully locally; Android release is deferred until testing).
+========================================================================
 Version: 1.0.2 / 8.7.1
 Build/Version Code: 3 / 8.7.1
 Release Date: June 16, 2026
