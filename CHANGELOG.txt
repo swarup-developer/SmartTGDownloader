@@ -121,6 +121,13 @@ channels look empty. Windows is unchanged at 8.8.0.
   the feature list; the bullet glyph is now decorative and carries no semantics.
 - Android: a failed download could not be retried without redoing the analysis,
   and History offered no way to retry a failed entry.
+- Android: three compiler warnings in the Telegram client, where TDLib's own
+  TdException declares its message as non-null while the code still guarded it
+  with fallbacks that could never run. The guards now cover the case that can
+  actually arrive - a blank message - so an auth error carrying no text reports
+  "Telegram error" rather than a sentence ending in a colon with nothing after
+  it, and a blank message no longer reaches the screen as an empty error. The
+  Android build now compiles warning-free.
 
 Version: 2.1.0 / 8.8.0
 Build/Version Code: 5 / 8.8.0 (Android 2.1.0 / Windows 8.8.0)

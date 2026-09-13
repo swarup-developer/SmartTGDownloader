@@ -191,7 +191,13 @@ class TelegramRepository(context: Context) {
                 // Not logged in yet: GetMe fails with 401 and the
                 // UpdateAuthorizationState flow drives the UI from here.
                 if (!isAuthStateError(e)) {
-                    _authState.value = AuthState.Error(e.message ?: "Telegram client error")
+                    // TdException.message is declared non-null, so "no message"
+                    // can only mean a blank one — and showing the user a blank
+                    // error is a silent failure, which is why the fallback is
+                    // kept rather than dropped along with the null check.
+                    _authState.value = AuthState.Error(
+                        e.message.takeIf { it.isNotBlank() } ?: "Telegram client error"
+                    )
                 }
             } catch (e: Exception) {
                 _authState.value = AuthState.Error(
@@ -203,7 +209,9 @@ class TelegramRepository(context: Context) {
 
     private fun isAuthStateError(error: TdException): Boolean {
         val code = error.code
-        val msg = error.message ?: ""
+        // Read straight through: TdException.message is declared non-null, so
+        // there is no missing case to substitute an empty string for.
+        val msg = error.message
         return code == 401 || msg.contains("AUTHORIZED", ignoreCase = true)
     }
 
@@ -346,7 +354,11 @@ class TelegramRepository(context: Context) {
 
     /** Human-readable message for common TDLib auth errors. */
     private fun mapAuthError(e: TdException): String {
-        val msg = e.message ?: return "Telegram error"
+        // A blank message is the one way this can arrive without words to match
+        // on — a null one cannot happen. Without this the fallback below would
+        // read "Telegram error: " with nothing after the colon.
+        val msg = e.message
+        if (msg.isBlank()) return "Telegram error"
         return when {
             msg.contains("PHONE_NUMBER_INVALID", true) -> "That phone number is not valid."
             msg.contains("PHONE_NUMBER_FLOOD", true) -> "Too many attempts. Try again later."
