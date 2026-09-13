@@ -114,3 +114,9 @@ Thumbs.db
 read_crash_log.py
 GEMINI.md
 test.py
+# Agent tooling state (Freebuff project id) - local to whoever runs the agent.
+.freebuff/
+
+# Orphan asset carried in the working tree; not referenced by the Windows
+# build, the app source, or CI.
+windows_desktop/assets/
