@@ -5,9 +5,10 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.swarupbaral.smarttgdownloader.AppContainer
 import com.swarupbaral.smarttgdownloader.data.AppPreferences
+import com.swarupbaral.smarttgdownloader.data.ChannelSettings
+import com.swarupbaral.smarttgdownloader.data.DownloadNetwork
 import com.swarupbaral.smarttgdownloader.data.TelegramRepository
 import com.swarupbaral.smarttgdownloader.data.ThemeMode
-import com.swarupbaral.smarttgdownloader.permissions.StoragePermissions
 import com.swarupbaral.smarttgdownloader.update.UpdateManager
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -64,23 +65,49 @@ class SettingsViewModel : ViewModel() {
         AppContainer.appPreferences.setDynamicColor(value)
     }
 
+    /**
+     * The app's filter options. Shared with the Home and History screens, so
+     * every filter control in the app edits one value, not three.
+     */
     val defaultCategory: StateFlow<String> = AppContainer.appPreferences.defaultCategory
 
     fun setDefaultCategory(value: String) {
         AppContainer.appPreferences.setDefaultCategory(value)
     }
 
-    // --- Storage permission status ------------------------------------------
+    // --- Scan limit ---------------------------------------------------------
 
     /**
-     * Mirrors StoragePermissions' live status: refreshed on every screen
-     * resume (see SettingsScreen's lifecycle effect), so returning from the
-     * system all-files page updates this immediately.
+     * Files one analysis collects before stopping; 0 means the whole channel.
+     * Serves as the default for channels with nothing remembered.
      */
-    val storageGranted: StateFlow<Boolean> =
-        StoragePermissions.status
-            .map { it.allFilesGranted }
-            .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+    val scanLimit: StateFlow<Int> = AppContainer.appPreferences.scanLimit
+
+    fun setScanLimit(value: Int) {
+        AppContainer.appPreferences.setScanLimit(value)
+    }
+
+    // --- Per-channel preferences --------------------------------------------
+
+    /** Every channel with remembered preferences, most recently used first. */
+    val channels: StateFlow<List<ChannelSettings>> = AppContainer.channelPreferences.channels
+
+    fun forgetChannel(chatId: Long) {
+        AppContainer.channelPreferences.forget(chatId)
+    }
+
+    fun forgetAllChannels() {
+        AppContainer.channelPreferences.forgetAll()
+    }
+
+    // --- Download connection ------------------------------------------------
+
+    /** Which networks downloads may use; enforced before every download. */
+    val downloadNetwork: StateFlow<DownloadNetwork> = AppContainer.appPreferences.downloadNetwork
+
+    fun setDownloadNetwork(value: DownloadNetwork) {
+        AppContainer.appPreferences.setDownloadNetwork(value)
+    }
 
     fun logOut() {
         viewModelScope.launch {

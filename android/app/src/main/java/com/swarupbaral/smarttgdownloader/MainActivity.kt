@@ -5,11 +5,16 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.SystemBarStyle
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Home
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
@@ -22,17 +27,29 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeoutOrNull
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import com.swarupbaral.smarttgdownloader.data.DownloadManager
 import com.swarupbaral.smarttgdownloader.data.TelegramRepository
 import com.swarupbaral.smarttgdownloader.ui.screens.HistoryScreen
 import com.swarupbaral.smarttgdownloader.ui.screens.HomeScreen
 import com.swarupbaral.smarttgdownloader.ui.screens.LoginScreen
-import com.swarupbaral.smarttgdownloader.ui.screens.PermissionsScreen
 import com.swarupbaral.smarttgdownloader.ui.screens.SetupScreen
 import com.swarupbaral.smarttgdownloader.ui.screens.SettingsScreen
 import com.swarupbaral.smarttgdownloader.ui.theme.SmartTGTheme
@@ -79,15 +96,54 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background
                 ) {
-                    SmartTGApp()
+                    StartupGate { SmartTGAppRoot() }
                 }
             }
         }
     }
 }
 
+/**
+ * Holds back the first screen until TDLib has reported a real authorization
+ * state, so a signed-in user goes straight to Home instead of watching the
+ * intro screen flash past. (The old permission screen used to absorb that
+ * pause; removing it exposed the flash.)
+ *
+ * Resolution is capped at a couple of seconds: a slow or offline network must
+ * never strand the user on a spinner, so the app renders its normal first
+ * screen regardless once the grace period is up.
+ */
+@Composable
+private fun StartupGate(content: @Composable () -> Unit) {
+    var settled by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        withTimeoutOrNull(2_500L) {
+            AppContainer.repository.authState.first { state ->
+                state !is TelegramRepository.AuthState.Idle &&
+                    state !is TelegramRepository.AuthState.Connecting
+            }
+        }
+        settled = true
+    }
+
+    if (settled) {
+        content()
+    } else {
+        Column(
+            modifier = Modifier.fillMaxSize(),
+            verticalArrangement = Arrangement.Center,
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            CircularProgressIndicator(
+                modifier = Modifier.semantics { contentDescription = "Loading" }
+            )
+            Spacer(Modifier.height(12.dp))
+            Text("Starting…", modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
+        }
+    }
+}
+
 private object Routes {
-    const val PERMISSIONS = "permissions"
     const val SETUP = "setup"
     const val LOGIN = "login"
     const val HOME = "home"
@@ -102,31 +158,71 @@ private val MAIN_TABS = listOf(
     Tab(Routes.HISTORY, "History")
 )
 
+/**
+ * Compose root of the whole UI.
+ *
+ * Deliberately NOT called `SmartTGApp`: the [SmartTGApp] Application class
+ * lives in the same package, and with both named `SmartTGApp` the call in
+ * [MainActivity.onCreate]'s setContent resolved to the Application
+ * *constructor* — it built a throwaway Application object, composed nothing,
+ * and the app launched to a blank screen. Keep these two names distinct.
+ */
 @Composable
-fun SmartTGApp(repository: TelegramRepository = AppContainer.repository) {
+fun SmartTGAppRoot(repository: TelegramRepository = AppContainer.repository) {
     val navController = rememberNavController()
     val authState by repository.authState.collectAsState()
+    val context = LocalContext.current
+
+    // Resume a batch that a process kill interrupted. Waits for an authorized
+    // state: resuming while TDLib has no client would just fail every file.
+    LaunchedEffect(authState) {
+        if (authState is TelegramRepository.AuthState.Ready) {
+            DownloadManager.resumePendingWork(context)
+        }
+    }
+
+    // Bring back the failures a previous process left behind, so the Retry card
+    // is there after a restart instead of the reason being lost with the
+    // process. Independent of sign-in: a failure is worth reporting either way.
+    LaunchedEffect(Unit) {
+        DownloadManager.restoreFailedState(context)
+    }
 
     LaunchedEffect(authState) {
+        // There is no permission gate any more: downloads are published
+        // through MediaStore (see DownloadsStore), which needs no grant, so
+        // the UI never blocks on storage access.
+        val current = navController.currentDestination?.route
         when (authState) {
             is TelegramRepository.AuthState.Ready -> {
-                // PERMISSIONS is the gate: never yank the user off it — the
-                // permission screen forwards to SETUP/HOME once granted.
-                if (navController.currentDestination?.route !in
-                    listOf(Routes.HOME, Routes.HISTORY, Routes.SETTINGS, Routes.PERMISSIONS)
-                ) {
+                if (current !in listOf(Routes.HOME, Routes.HISTORY, Routes.SETTINGS)) {
                     navController.navigate(Routes.HOME) { launchSingleTop = true }
                 }
             }
+            // WaitPhoneNumber matters too, otherwise a fresh install would sit
+            // on the intro screen while Telegram is ready to take a number.
+            is TelegramRepository.AuthState.WaitPhoneNumber,
             is TelegramRepository.AuthState.AwaitingCode,
             is TelegramRepository.AuthState.AwaitingPassword -> {
-                if (navController.currentDestination?.route != Routes.LOGIN &&
-                    navController.currentDestination?.route != Routes.PERMISSIONS
-                ) {
+                if (current != Routes.LOGIN) {
                     navController.navigate(Routes.LOGIN) { launchSingleTop = true }
                 }
             }
             else -> Unit
+        }
+    }
+
+    // Resolved once, from whatever TDLib has already told us: a returning user
+    // opens on Home, anyone mid-login opens on Login, and only a fresh install
+    // sees the intro. Computed here (not from a later state change) so the
+    // NavHost never has to swap the start destination out from under itself.
+    val startDestination = remember {
+        when (repository.authState.value) {
+            is TelegramRepository.AuthState.Ready -> Routes.HOME
+            is TelegramRepository.AuthState.WaitPhoneNumber,
+            is TelegramRepository.AuthState.AwaitingCode,
+            is TelegramRepository.AuthState.AwaitingPassword -> Routes.LOGIN
+            else -> Routes.SETUP
         }
     }
 
@@ -177,19 +273,9 @@ fun SmartTGApp(repository: TelegramRepository = AppContainer.repository) {
     ) { padding ->
         NavHost(
             navController = navController,
-            startDestination = Routes.PERMISSIONS,
+            startDestination = startDestination,
             modifier = Modifier.padding(padding)
         ) {
-            composable(Routes.PERMISSIONS) {
-                PermissionsScreen(
-                    onAllGranted = {
-                        navController.navigate(Routes.SETUP) {
-                            popUpTo(Routes.PERMISSIONS) { inclusive = true }
-                            launchSingleTop = true
-                        }
-                    }
-                )
-            }
             composable(Routes.SETUP) {
                 SetupScreen(
                     onContinue = { navController.navigate(Routes.LOGIN) { launchSingleTop = true } }

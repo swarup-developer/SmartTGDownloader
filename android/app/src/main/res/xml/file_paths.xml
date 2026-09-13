@@ -1,13 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <paths>
-    <!-- Matches context.getExternalFilesDir(null) roots, where downloads live:
-         downloads/<source>/<category>/<file> -->
+    <!-- Legacy fallback only (Android 8/9 when the storage grant was denied):
+         downloads land in getExternalFilesDir(DIRECTORY_DOWNLOADS) instead.
+         On Android 10+ files are published through MediaStore and opened by
+         their content:// URI, which needs no FileProvider entry. -->
     <external-files-path
-        name="downloads"
-        path="downloads/" />
+        name="downloads_fallback"
+        path="Download/" />
     <files-path
-        name="internal_downloads"
-        path="downloads/" />
+        name="downloads_fallback_internal"
+        path="Download/" />
     <!-- Downloaded update APKs (cache/updates). -->
     <cache-path
         name="update_apks"

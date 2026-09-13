@@ -8,6 +8,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -32,14 +33,54 @@ class TelegramRepository(context: Context) {
     sealed interface AuthState {
         data object Idle : AuthState
         data object Connecting : AuthState
-        data class AwaitingCode(val hint: String?) : AuthState
+
+        /** Telegram is waiting for a phone number (first run, or after log-out). */
+        data object WaitPhoneNumber : AuthState
+
+        /**
+         * A code was requested and Telegram is waiting for it.
+         *
+         * [resendInSeconds] is TDLib's server-authoritative cooldown before
+         * another code may be requested. It is not a fixed value: Telegram
+         * raises it on each resend (roughly 30s, then 50s, then a minute), so
+         * the UI reads this value instead of running its own timer.
+         */
+        data class AwaitingCode(
+            /** Masked number Telegram echoed back, when it provides one. */
+            val phoneNumber: String?,
+            /** How the code was or will be delivered. */
+            val channel: CodeChannel,
+            /** Expected code length; 0 when unknown. */
+            val codeLength: Int,
+            val resendInSeconds: Int
+        ) : AuthState
+
         data class AwaitingPassword(val hint: String?) : AuthState
         data class Ready(val userName: String) : AuthState
         data class Error(val message: String) : AuthState
     }
 
+    /** How Telegram delivers the login code; drives the screen-reader wording. */
+    enum class CodeChannel(
+        val label: String,
+        /** Spoken form, for announcements: "Code sent via <spoken>". */
+        val spoken: String
+    ) {
+        SMS("SMS", "an SMS"),
+        TELEGRAM("Telegram message", "a Telegram message"),
+        CALL("Phone call", "a phone call"),
+        FLASH_CALL("Flash call", "a flash call"),
+        OTHER("Telegram", "Telegram")
+    }
+
     data class ScannedFile(
         val messageId: Long,
+        /**
+         * TDLib file id of the attachment. Carried on the row itself so
+         * download progress can be routed without keeping every
+         * [TdApi.Message] of a large channel in memory.
+         */
+        val fileId: Int,
         val name: String,
         val sizeBytes: Long,
         val category: String,
@@ -49,7 +90,43 @@ class TelegramRepository(context: Context) {
     data class ScanResult(
         val sourceTitle: String,
         val files: List<ScannedFile>,
-        val totalCount: Int
+        val totalCount: Int,
+        /**
+         * How many chat messages the scan actually walked. Reported in the
+         * "no files found" state so the user can tell a genuinely empty link
+         * apart from one that was never analyzed.
+         */
+        val scannedMessages: Int,
+        /**
+         * True when collection stopped at the configured file limit rather
+         * than at the end of the channel. The UI must say so, otherwise a
+         * truncated result looks like the whole channel.
+         */
+        val limitReached: Boolean = false,
+        /** The limit that applied, 0 when unlimited. */
+        val fileLimit: Int = 0,
+        /**
+         * How many media files the walk passed over because they were not the
+         * requested type. Analysis now runs for one type at a time, so this is
+         * what lets an empty result say "no Audio files, but there are 342
+         * video and document files here — try another file type" instead of a
+         * bare "nothing found" that hides the rest of the channel.
+         *
+         * Counted only up to the point the walk stopped, so it is a lower
+         * bound whenever [limitReached] is true.
+         */
+        val otherMediaCount: Int = 0,
+        /**
+         * True when the history walk gave up before reaching the start of the
+         * chat, while Telegram's own message count showed there was more to
+         * come.
+         *
+         * This is the difference between "this channel has no Audio files" and
+         * "the channel's history had not finished loading yet". The second is
+         * retryable, and it previously looked exactly like the first — which is
+         * how a channel full of files came back as zero.
+         */
+        val historyIncomplete: Boolean = false
     )
 
     data class DownloadProgress(
@@ -165,10 +242,17 @@ class TelegramRepository(context: Context) {
     private suspend fun applyAuthState(state: TdApi.AuthorizationState) {
         when (state) {
             is TdApi.AuthorizationStateWaitPhoneNumber ->
-                _authState.value = AuthState.AwaitingCode(hint = null)
+                _authState.value = AuthState.WaitPhoneNumber
 
-            is TdApi.AuthorizationStateWaitCode ->
-                _authState.value = AuthState.AwaitingCode(hint = null)
+            is TdApi.AuthorizationStateWaitCode -> {
+                val info = state.codeInfo
+                _authState.value = AuthState.AwaitingCode(
+                    phoneNumber = info?.phoneNumber,
+                    channel = channelFor(info?.type),
+                    codeLength = codeLengthFor(info?.type),
+                    resendInSeconds = (info?.timeout ?: 0).coerceAtLeast(0)
+                )
+            }
 
             is TdApi.AuthorizationStateWaitPassword ->
                 _authState.value = AuthState.AwaitingPassword(hint = state.passwordHint)
@@ -195,18 +279,27 @@ class TelegramRepository(context: Context) {
         }
     }
 
-    /** Surfaces a user-facing auth error from the ViewModel layer. */
-    fun reportError(message: String) {
-        val current = _authState.value
-        if (current !is AuthState.Ready) {
-            _authState.value = AuthState.Error(message)
-        }
-    }
-
     /** Requests the OTP for [phoneNumber] (E.164, e.g. +919876543210). */
     suspend fun requestOtp(phoneNumber: String) {
         try {
             send(TdApi.SetAuthenticationPhoneNumber(phoneNumber, null))
+        } catch (e: TdException) {
+            throw IllegalArgumentException(mapAuthError(e), e)
+        }
+    }
+
+    /**
+     * Asks Telegram to send the login code again.
+     *
+     * TDLib tracks the server's cooldown itself, so this is a plain request:
+     * if Telegram is still rate-limiting, it answers with FLOOD_WAIT and
+     * [mapAuthError] turns that into a readable message. The refreshed state
+     * arrives through the authorization-state stream with a new
+     * [AuthState.AwaitingCode.resendInSeconds].
+     */
+    suspend fun resendCode() {
+        try {
+            send(TdApi.ResendAuthenticationCode())
         } catch (e: TdException) {
             throw IllegalArgumentException(mapAuthError(e), e)
         }
@@ -226,6 +319,29 @@ class TelegramRepository(context: Context) {
 
     suspend fun logOut() {
         runCatching { send(TdApi.LogOut()) }
+    }
+
+    private fun channelFor(type: TdApi.AuthenticationCodeType?): CodeChannel = when (type) {
+        is TdApi.AuthenticationCodeTypeSms,
+        is TdApi.AuthenticationCodeTypeSmsWord,
+        is TdApi.AuthenticationCodeTypeSmsPhrase -> CodeChannel.SMS
+
+        is TdApi.AuthenticationCodeTypeTelegramMessage -> CodeChannel.TELEGRAM
+        is TdApi.AuthenticationCodeTypeCall -> CodeChannel.CALL
+        is TdApi.AuthenticationCodeTypeFlashCall,
+        is TdApi.AuthenticationCodeTypeMissedCall -> CodeChannel.FLASH_CALL
+
+        else -> CodeChannel.OTHER
+    }
+
+    /** Digits the code will have, when Telegram states it; 0 = unknown. */
+    private fun codeLengthFor(type: TdApi.AuthenticationCodeType?): Int = when (type) {
+        is TdApi.AuthenticationCodeTypeSms -> type.length
+        is TdApi.AuthenticationCodeTypeTelegramMessage -> type.length
+        is TdApi.AuthenticationCodeTypeCall -> type.length
+        is TdApi.AuthenticationCodeTypeMissedCall -> type.length
+        is TdApi.AuthenticationCodeTypeFragment -> type.length
+        else -> 0
     }
 
     /** Human-readable message for common TDLib auth errors. */
@@ -350,83 +466,153 @@ class TelegramRepository(context: Context) {
     // Scan (link analysis)
     // ------------------------------------------------------------------
 
+    /** A chat resolved from a link, before any of its history has been read. */
+    data class ResolvedSource(val chatId: Long, val title: String)
+
     /**
-     * Analyzes [link], returning every media file matching [categories]
-     * ("Audio", "Video", "Images", "Docs").
+     * Resolves [link] to a chat, joining an invite link when membership is
+     * required to read it.
+     *
+     * Split out of the scan so the caller can load this channel's remembered
+     * preferences — the scan limit in particular — before its history is walked.
+     */
+    suspend fun resolveSource(link: String): ResolvedSource = withContext(Dispatchers.IO) {
+        val chat = resolveChat(parseLink(link))
+        ResolvedSource(chatId = chat.id, title = chat.title.ifBlank { "Telegram" })
+    }
+
+    /**
+     * Scans an already-resolved channel, returning every media file matching
+     * [categories] ("Audio", "Video", "Images", "Docs").
+     *
+     * Callers pass exactly the type the user chose to download, so the walk
+     * looks for one type instead of collecting everything and discarding most
+     * of it. Media of other types is counted into
+     * [ScanResult.otherMediaCount] as it goes past, which is what an empty
+     * result needs in order to point at the rest of the channel.
      *
      * A monotonically increasing [scanToken] guarantees results from an older
      * scan can never overwrite a newer request — the stale-cache bug from the
      * previous version is structurally impossible here because each scan owns
      * its token and results are returned (never cached) per token.
+     *
+     * [fileLimit] caps how many matching files are collected (0 = unlimited).
+     * History is walked newest-first, so a limit keeps the 
+     * most recent files; [ScanResult.limitReached] reports that the result was 
+     * cut short.
+     *
+     * [onProgress] is invoked after each history page with the running message
+     * and file counts, plus whether the walk is currently waiting for Telegram
+     * to load older messages rather than making progress. A busy channel takes
+     * many pages to walk, so the UI needs something truthful to show (and
+     * announce) meanwhile. It is called on the IO dispatcher.
      */
-    suspend fun scanLink(
-        link: String,
+    suspend fun scanChat(
+        source: ResolvedSource,
         categories: Set<String>,
-        scanToken: Long
+        scanToken: Long,
+        fileLimit: Int = 0,
+        onProgress: (
+            scannedMessages: Int,
+            filesFound: Int,
+            waitingForHistory: Boolean
+        ) -> Unit = { _, _, _ -> }
     ): ScanResult = withContext(Dispatchers.IO) {
-        val parsed = parseLink(link)
-        val chat = resolveChat(parsed)
-        val sourceTitle = chat.title.ifBlank { "Telegram" }
-
         val collected = mutableListOf<ScannedFile>()
-        val messagesById = mutableMapOf<Long, TdApi.Message>()
-        var fromMessageId = 0L
-        val pageSize = 100
+        var limitReached = false
+        var otherMedia = 0
+        // All paging decisions live in HistoryWalk, which is unit-tested: they
+        // are what a large channel got wrong before, and none of it is about
+        // the network.
+        val walk = HistoryWalk()
 
+        // fromMessageId = 0 starts at the newest message and walks backwards,
+        // so results naturally arrive most-recent-first.
         while (true) {
             val history = send(
                 TdApi.GetChatHistory(
-                    chat.id,
-                    fromMessageId,
+                    source.chatId,
+                    walk.fromMessageId,
                     0,
-                    pageSize,
+                    walk.requestedPageSize,
                     false
                 )
             )
 
             val messages = history.messages ?: emptyArray()
-            if (messages.isEmpty()) break
+            // Maps the ids the walk approved back to the messages they came
+            // from, so the walk itself never has to know about TdApi.
+            val messagesById = messages.associateBy { it.id }
 
-            for (message in messages) {
-                val file = messageFile(message) ?: continue
-                val category = categoryFor(message)
-                if (category == null || categories.none { it.equals(category, true) }) continue
+            when (val step = walk.next(messages.map { it.id }, history.totalCount)) {
+                is HistoryWalk.Step.End -> break
 
-                messagesById[message.id] = message
-                collected += ScannedFile(
-                    messageId = message.id,
-                    name = buildFileName(message),
-                    sizeBytes = file.expectedSize,
-                    category = category,
-                    dateEpoch = message.date.toLong()
-                )
+                is HistoryWalk.Step.Retry -> {
+                    // TDLib answered out of the history it has loaded so far and
+                    // is fetching the rest in the background. Saying so beats an
+                    // unexplained pause — and beats ending the scan here, which
+                    // is what used to make a big channel look empty.
+                    onProgress(walk.scannedMessages, collected.size, true)
+                    delay(step.delayMs)
+                }
+
+                is HistoryWalk.Step.Advance -> {
+                    for (id in step.fresh) {
+                        val message = messagesById[id] ?: continue
+                        val file = messageFile(message) ?: continue
+                        val category = categoryFor(message) ?: continue
+                        if (categories.none { it.equals(category, true) }) {
+                            // Media, just not the type that was asked for.
+                            // Counted so a "no Audio files" answer can still
+                            // point at what IS here.
+                            otherMedia++
+                            continue
+                        }
+
+                        collected += ScannedFile(
+                            messageId = message.id,
+                            fileId = file.id,
+                            name = buildFileName(message),
+                            sizeBytes = file.expectedSize,
+                            category = category,
+                            dateEpoch = message.date.toLong()
+                        )
+                        if (fileLimit > 0 && collected.size >= fileLimit) {
+                            limitReached = true
+                            break
+                        }
+                    }
+
+                    onProgress(walk.scannedMessages, collected.size, false)
+                }
             }
 
-            if (messages.size < pageSize) break
-            fromMessageId = messages.last().id
+            if (limitReached) break
         }
 
-        collected.sortBy { it.messageId }
+        // Publish this scan as the single source of truth for its token. Only
+        // the chat id is retained: the messages themselves can be an enormous
+        // map on a large channel, and each one is one cheap TDLib lookup away
+        // when a download actually starts.
+        ScanRegistry.record(scanToken, source.chatId)
 
-        // Publish this scan as the single source of truth for its token.
-        ScanRegistry.record(scanToken, chat.id, messagesById)
-
+        // Deliberately NOT re-sorted: the walk order (newest first) is the order
+        // the user sees, so "file 1" in the range picker is the most recent
+        // file — and stays the most recent when a limit truncates the scan.
         ScanResult(
-            sourceTitle = sourceTitle,
+            sourceTitle = source.title,
             files = collected,
-            totalCount = collected.size
+            totalCount = collected.size,
+            scannedMessages = walk.scannedMessages,
+            limitReached = limitReached,
+            fileLimit = fileLimit,
+            otherMediaCount = otherMedia,
+            historyIncomplete = walk.historyIncomplete
         )
     }
 
-    /** TDLib file id of the media attached to [message], if any. */
-    fun fileIdOf(message: TdApi.Message): Int? = messageFile(message)?.id
-
     /** Chat id captured for the scan with this token (0 if superseded). */
     fun chatIdForToken(token: Long): Long = ScanRegistry.chatIdFor(token)
-
-    /** Raw TDLib messages captured for the scan with this token. */
-    fun messagesForToken(token: Long): Map<Long, TdApi.Message> =
-        ScanRegistry.messagesFor(token)
 
     private suspend fun resolveChat(parsed: ParsedLink): TdApi.Chat {
         return when (parsed) {
@@ -525,21 +711,16 @@ class TelegramRepository(context: Context) {
     // ------------------------------------------------------------------
 
     /**
-     * Downloads the media attached to [message] into [destinationDir],
-     * reporting progress through [downloadProgress]. Returns the local path.
+     * Fetches the media attached to [message] into TDLib's own cache and
+     * returns the local file, reporting progress through [downloadProgress].
+     *
+     * TDLib never writes outside app storage, so publishing the result into
+     * the user's Download folder is the caller's job — see `DownloadsStore`,
+     * which does it through MediaStore and therefore needs no permission.
      */
-    suspend fun downloadFile(
-        message: TdApi.Message,
-        destinationDir: File
-    ): String = withContext(Dispatchers.IO) {
+    suspend fun downloadToCache(message: TdApi.Message): File = withContext(Dispatchers.IO) {
         val file = messageFile(message)
             ?: throw IllegalStateException("Message has no downloadable media.")
-
-        destinationDir.mkdirs()
-        val target = File(destinationDir, buildFileName(message))
-        if (target.exists() && file.expectedSize > 0 && target.length() == file.expectedSize) {
-            return@withContext target.absolutePath
-        }
 
         val downloaded = send(
             TdApi.DownloadFile(
@@ -551,22 +732,23 @@ class TelegramRepository(context: Context) {
             )
         )
 
-        val finalLocal = downloaded.local.path
-        val finalFile = File(finalLocal)
-        if (finalFile.exists() && finalFile.absolutePath != target.absolutePath) {
-            finalFile.copyTo(target, overwrite = true)
+        val local = File(downloaded.local.path)
+        if (!local.exists() || local.length() == 0L) {
+            throw IllegalStateException("Telegram did not return the downloaded file.")
         }
+
         // The synchronous result is authoritative — publish a 100% tick keyed
-        // by fileId in case no completion UpdateFile arrived for this file.
+        // by fileId in case no completion UpdateFile arrived for this file, so
+        // the row's progress bar actually fills.
         _downloadProgress.tryEmit(
             DownloadProgress(
                 fileId = downloaded.id,
-                name = target.name,
-                downloadedBytes = downloaded.expectedSize.takeIf { it > 0 } ?: target.length(),
-                totalBytes = downloaded.expectedSize.takeIf { it > 0 } ?: target.length()
+                name = local.name,
+                downloadedBytes = local.length(),
+                totalBytes = downloaded.expectedSize.takeIf { it > 0 } ?: local.length()
             )
         )
-        target.absolutePath
+        local
     }
 
     suspend fun getMessage(chatId: Long, messageId: Long): TdApi.Message? =

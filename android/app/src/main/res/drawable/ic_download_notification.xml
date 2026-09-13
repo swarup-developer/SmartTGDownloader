@@ -1,0 +1,16 @@
+<!-- Notification small icon. Must be a flat monochrome shape: the system tints
+     it, so any color here is discarded and only the alpha channel matters. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <!-- Downward arrow. -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M11,3h2v8h4l-5.6,6.6a0.5,0.5 0 0,1 -0.8,0L5,11h4z" />
+    <!-- Baseline. -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M5,19h14v2H5z" />
+</vector>

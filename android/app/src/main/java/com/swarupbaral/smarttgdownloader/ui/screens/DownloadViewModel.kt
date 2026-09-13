@@ -1,30 +1,42 @@
 package com.swarupbaral.smarttgdownloader.ui.screens
 
 import android.content.Context
-import android.os.Environment
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.swarupbaral.smarttgdownloader.AppContainer
 import com.swarupbaral.smarttgdownloader.data.AppPreferences
-import com.swarupbaral.smarttgdownloader.data.DownloadHistoryEntity
+import com.swarupbaral.smarttgdownloader.data.ChannelDefaults
+import com.swarupbaral.smarttgdownloader.data.ChannelSettings
+import com.swarupbaral.smarttgdownloader.data.DownloadManager
+import com.swarupbaral.smarttgdownloader.data.NetworkGuard
+import com.swarupbaral.smarttgdownloader.data.QueuedDownload
+import com.swarupbaral.smarttgdownloader.data.SavedRange
 import com.swarupbaral.smarttgdownloader.data.TelegramRepository
-import java.io.File
+import com.swarupbaral.smarttgdownloader.data.resolveChannelSettings
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
 /**
- * Orchestrates the analyze → select → download pipeline.
+ * Orchestrates the analyze → filter → select → download pipeline.
+ *
+ * Link analysis is deliberately *complete*: [analyze] walks the whole chat
+ * history and collects every downloadable file, then the user's filter decides
+ * what is shown. That split is what lets the UI say "this link has no files at
+ * all" and "this link has files, but none of them are Audio" as two different,
+ * truthful messages instead of one vague empty screen.
+ *
+ * The download itself is NOT run here. It is handed to [DownloadManager], which
+ * runs it in a foreground service so it survives this ViewModel being cleared.
+ * This class mirrors the engine's state into the UI and does nothing else with
+ * it.
  *
  * Scan tokens: every Analyze press mints a monotonically increasing token.
  * A new token immediately invalidates any in-flight scan, so results from a
- * previous link can never repopulate the results sheet — the Android mirror
- * of the stale-cache bug fixed on the Windows side.
+ * previous link can never repopulate the results sheet.
  */
 class DownloadViewModel : ViewModel() {
 
@@ -41,9 +53,33 @@ class DownloadViewModel : ViewModel() {
             get() = totalBytes > 0 && downloadedBytes >= totalBytes
     }
 
+    /** Why the last scan produced nothing to show, phrased for the user. */
+    data class EmptyResult(val title: String, val detail: String)
+
+    /**
+     * Stage of the results flow: find out what is there, then choose how much
+     * of it to take, then confirm the size before anything is fetched.
+     *
+     * The order matters for a screen reader user: the count is announced
+     * first, and the download button does not become reachable until a
+     * selection (and therefore a total size) exists.
+     */
+    enum class SelectionStage {
+        /** "N files found. Download all, or select a range?" */
+        CHOOSE,
+
+        /** The range picker is open, and nothing is selected yet. */
+        RANGE,
+
+        /** A selection exists; the totals are shown and Start download is live. */
+        CONFIRM
+    }
+
     data class UiState(
         val link: String = "",
         val analyzing: Boolean = false,
+        /** Live "N messages checked, M found" text while a scan is running. */
+        val scanProgress: String? = null,
         val statusMessage: String? = null,
         val errorMessage: String? = null,
         val scanResult: TelegramRepository.ScanResult? = null,
@@ -51,40 +87,118 @@ class DownloadViewModel : ViewModel() {
         val downloading: Boolean = false,
         val progressText: String? = null,
         /** Live per-file progress keyed by the scanned row's messageId. */
-        val fileProgress: Map<Long, FileProgress> = emptyMap()
-    )
+        val fileProgress: Map<Long, FileProgress> = emptyMap(),
+        /** Active filter; one of [AppPreferences.DOWNLOAD_CATEGORIES]. */
+        val categoryFilter: String = AppPreferences.CATEGORY_ALL,
+        /** Set when the link yielded nothing to display. */
+        val emptyResult: EmptyResult? = null,
+        /** Which part of the choose → range → confirm flow is on screen. */
+        val stage: SelectionStage = SelectionStage.CHOOSE,
+        /**
+         * The file type the loaded results were scanned for. A scan now looks
+         * for one type only, so results stop being valid the moment the filter
+         * changes — comparing against this is how that is detected.
+         */
+        val scannedFilter: String? = null,
+        /** Why individual files failed, keyed by messageId, for row wording. */
+        val failures: Map<Long, String> = emptyMap()
+    ) {
+        /** Files from the last scan that pass the active filter. */
+        val visibleFiles: List<TelegramRepository.ScannedFile>
+            get() = scanResult?.files.orEmpty().filter { passesFilter(it) }
+
+        val visibleSelected: List<TelegramRepository.ScannedFile>
+            get() = visibleFiles.filter { it.messageId in selected }
+
+        /**
+         * Total bytes of the selection, from the sizes Telegram reported when
+         * the channel was scanned.
+         */
+        val selectedBytes: Long get() = visibleSelected.sumOf { it.sizeBytes }
+
+        /**
+         * Selected files Telegram did not give a size for. They cannot be
+         * counted, so the displayed total is stated as a floor rather than as
+         * a number that would turn out wrong.
+         */
+        val unknownSizeCount: Int get() = visibleSelected.count { it.sizeBytes <= 0 }
+
+        private fun passesFilter(file: TelegramRepository.ScannedFile): Boolean =
+            categoryFilter == AppPreferences.CATEGORY_ALL || file.category == categoryFilter
+    }
 
     private val repository = AppContainer.repository
 
     private val _uiState = MutableStateFlow(UiState())
     val uiState: StateFlow<UiState> = _uiState.asStateFlow()
 
-    private val _events = MutableSharedFlow<String>(extraBufferCapacity = 4)
-    val events: SharedFlow<String> = _events.asSharedFlow()
+    private val _lastRange = MutableStateFlow(AppContainer.appPreferences.lastRange.value)
+
+    /**
+     * Range picker values for the channel currently loaded — that channel's
+     * remembered range when it has one, otherwise the app-wide default. Held
+     * here rather than read from preferences so switching channels switches the
+     * picker with it.
+     */
+    val lastRange: StateFlow<SavedRange> = _lastRange.asStateFlow()
+
+    /** The channel the current results belong to, once a link has resolved. */
+    private var currentChatId: Long? = null
+
+    /** True while the engine holds queued work, including across restarts. */
+    val downloadRunning: StateFlow<DownloadManager.RunState> = DownloadManager.state
+
+    /**
+     * Files the engine could not save, so the UI can offer to try them again.
+     * Read straight from the engine: failures belong to the run, not a screen.
+     */
+    val failedDownloads: StateFlow<List<QueuedDownload>> = DownloadManager.failedItems
 
     private var scanJob: Job? = null
     private var scanToken: Long = 0L
-    private var downloadJob: Job? = null
-
-    /** TDLib fileId → scanned row's messageId, rebuilt on every analyze. */
-    private val messageIdsByFileId = mutableMapOf<Int, Long>()
 
     init {
-        // Collapse the repository's UpdateFile-derived stream into per-row
-        // progress keyed by messageId, so the results sheet can render a live
-        // bar per file. TDLib file ids are matched to scan rows via the raw
-        // TdApi.File captured in ScanRegistry.
+        // The filter lives in Settings, so Home follows it rather than keeping
+        // a second, divergent copy of the choice.
         viewModelScope.launch {
-            repository.downloadProgress.collect { progress ->
-                val messageId = messageIdsByFileId[progress.fileId]
-                if (messageId == null) return@collect
+            AppContainer.appPreferences.defaultCategory.collect { category ->
+                applyFilter(category)
+            }
+        }
+
+        // Failure reasons come straight from the engine, so a run that failed
+        // while this screen was closed still shows up in the rows.
+        viewModelScope.launch {
+            DownloadManager.failures.collect { reasons ->
+                _uiState.value = _uiState.value.copy(failures = reasons)
+            }
+        }
+
+        // Mirror the engine's per-file progress onto the scanned rows.
+        viewModelScope.launch {
+            DownloadManager.fileProgress.collect { progress ->
                 _uiState.value = _uiState.value.copy(
-                    fileProgress = _uiState.value.fileProgress + (
-                        messageId to FileProgress(
-                            downloadedBytes = progress.downloadedBytes,
-                            totalBytes = progress.totalBytes
-                        )
-                        )
+                    fileProgress = progress.mapValues { (_, value) ->
+                        FileProgress(value.downloadedBytes, value.totalBytes)
+                    }
+                )
+            }
+        }
+
+        // Mirror the run itself: whether it is running, what it is saving now,
+        // and how it finished.
+        viewModelScope.launch {
+            DownloadManager.state.collect { run ->
+                _uiState.value = _uiState.value.copy(
+                    downloading = run.isRunning,
+                    progressText = if (run.isRunning && run.currentName != null) {
+                        "Saving ${run.currentName} (${run.completed + 1} of ${run.total})"
+                    } else {
+                        null
+                    },
+                    // A terminal run reports its own summary; otherwise leave the
+                    // last message standing so it stays readable.
+                    statusMessage = if (run.isTerminal) run.message else _uiState.value.statusMessage
                 )
             }
         }
@@ -92,6 +206,114 @@ class DownloadViewModel : ViewModel() {
 
     fun updateLink(value: String) {
         _uiState.value = _uiState.value.copy(link = value)
+    }
+
+    /**
+     * Changes the active filter. Persists it, so the option list and the
+     * selection stay identical wherever the filter is edited (Settings or
+     * Home) — there is one filter, not one per screen.
+     */
+    fun setFilter(category: String) {
+        // With a channel loaded this is a per-channel choice; before any
+        // analysis it edits the app-wide default instead.
+        if (currentChatId == null) {
+            AppContainer.appPreferences.setDefaultCategory(category)
+        } else {
+            rememberOnCurrentChannel { it.copy(filter = category) }
+        }
+        applyFilter(category)
+    }
+
+    /**
+     * Adopts [category] as the active filter, discarding results that were
+     * scanned for a different type.
+     *
+     * Because a scan now looks for exactly one file type, yesterday's answer for
+     * "Audio" says nothing about "Video". Keeping the old rows on screen would
+     * invite the user to download files that were never looked for, so the stale
+     * result is dropped and the sheet's empty state says to analyze again.
+     */
+    private fun applyFilter(category: String) {
+        val state = _uiState.value
+        if (state.categoryFilter == category) return
+        val stale = state.scanResult != null && state.scannedFilter != category
+        _uiState.value = state.copy(
+            categoryFilter = category,
+            scanResult = if (stale) null else state.scanResult,
+            selected = if (stale) emptySet() else state.selected,
+            stage = SelectionStage.CHOOSE,
+            emptyResult = null,
+            statusMessage = if (stale) {
+                "File type changed to $category. Analyze the link again to scan for " +
+                    "$category files."
+            } else {
+                state.statusMessage
+            }
+        )
+        if (!stale) {
+            pruneSelectionToVisible()
+            refreshEmptyResult()
+        }
+    }
+
+    /**
+     * Loads [source]'s remembered preferences and makes them current.
+     *
+     * [filter] is the type the user picked on screen before pressing Analyze,
+     * and it is what the scan uses — a remembered per-channel filter must never
+     * quietly replace a choice the user just made. Range and scan limit *are*
+     * read from the channel: those only make sense per channel, and unlike the
+     * type they cannot be chosen before the link resolves.
+     *
+     * The entry is written back straight away, so a channel is recorded the
+     * first time it is analyzed and shows up under Settings even if the user
+     * never touches anything about it.
+     */
+    private fun applyChannelSettings(
+        source: TelegramRepository.ResolvedSource,
+        filter: String
+    ): ChannelSettings {
+        currentChatId = source.chatId
+
+        val saved = AppContainer.channelPreferences.get(source.chatId)
+        val defaults = AppContainer.appPreferences.lastRange.value
+        val settings = resolveChannelSettings(
+            chatId = source.chatId,
+            title = source.title,
+            chosenFilter = filter,
+            saved = saved,
+            defaults = ChannelDefaults(
+                rangeFrom = defaults.from,
+                rangeTo = defaults.to,
+                scanLimit = AppContainer.appPreferences.scanLimit.value
+            )
+        )
+        AppContainer.channelPreferences.save(settings)
+        _lastRange.value = SavedRange(settings.rangeFrom, settings.rangeTo)
+        return settings
+    }
+
+    /** Edits the current channel's remembered preferences, if there is one. */
+    private fun rememberOnCurrentChannel(transform: (ChannelSettings) -> ChannelSettings) {
+        val chatId = currentChatId ?: return
+        val existing = AppContainer.channelPreferences.get(chatId) ?: return
+        AppContainer.channelPreferences.save(
+            transform(existing).copy(updatedAtEpochMs = System.currentTimeMillis())
+        )
+    }
+
+    /**
+     * Raises this channel's scan limit one step and analyzes again.
+     *
+     * Offered right where the truncation is reported, so deepening a single
+     * channel's search does not mean hunting for a global setting that would
+     * then apply to every other channel too.
+     */
+    fun searchDeeper() {
+        val current = _uiState.value.scanResult?.fileLimit ?: return
+        val next = AppPreferences.nextScanLimit(current) ?: return
+        rememberOnCurrentChannel { it.copy(scanLimit = next) }
+        analyze()
     }
 
     fun analyze() {
@@ -103,61 +325,73 @@ class DownloadViewModel : ViewModel() {
 
         val token = ++scanToken
         scanJob?.cancel()
-        messageIdsByFileId.clear()
         _uiState.value = _uiState.value.copy(
             analyzing = true,
             errorMessage = null,
-            statusMessage = "Analyzing link…",
+            statusMessage = null,
+            scanProgress = "Resolving the channel…",
             scanResult = null,
+            scannedFilter = null,
             selected = emptySet(),
-            fileProgress = emptyMap()
+            stage = SelectionStage.CHOOSE,
+            emptyResult = null
         )
 
         scanJob = viewModelScope.launch {
             try {
-                val result = repository.scanLink(
-                    link = link,
-                    categories = setOf("Audio", "Video", "Images", "Docs"),
-                    scanToken = token
+                // Resolve before scanning: the channel identity is what its
+                // remembered scan limit is keyed on, and that limit decides how
+                // deep the walk goes.
+                val source = repository.resolveSource(link)
+                if (token != scanToken) return@launch
+                val settings = applyChannelSettings(source, _uiState.value.categoryFilter)
+
+                // Scan for the chosen type only. The user picks the file type
+                // before pressing Analyze, so the walk looks for exactly that —
+                // which also means a big channel is not trawled for media the
+                // user has already said they do not want.
+                val result = repository.scanChat(
+                    source = source,
+                    categories = categoriesFor(settings.filter),
+                    scanToken = token,
+                    // Bounds how long a huge channel can take to analyze.
+                    fileLimit = settings.scanLimit,
+                    // Called on the IO dispatcher once per history page, so a
+                    // slow walk through a big channel still shows progress.
+                    onProgress = { scanned, found, waiting ->
+                        if (token == scanToken) {
+                            _uiState.value = _uiState.value.copy(
+                                scanProgress = scanProgressText(scanned, found, waiting)
+                            )
+                        }
+                    }
                 )
                 if (token != scanToken) return@launch // superseded by a newer scan
 
-                // Route TDLib UpdateFile progress to the right results-sheet row.
-                messageIdsByFileId.clear()
-                for ((messageId, message) in repository.messagesForToken(token)) {
-                    repository.fileIdOf(message)?.let { fileId ->
-                        messageIdsByFileId[fileId] = messageId
-                    }
-                }
-
-                // Pre-select files according to the user's default category.
-                val defaultCategory = AppContainer.appPreferences.defaultCategory.value
-                val preselected =
-                    if (defaultCategory == AppPreferences.CATEGORY_ALL ||
-                        defaultCategory.isBlank()
-                    ) {
-                        result.files.map { it.messageId }
-                    } else {
-                        result.files.filter { it.category == defaultCategory }
-                            .map { it.messageId }
-                    }
+                val filter = settings.filter
 
                 _uiState.value = _uiState.value.copy(
                     analyzing = false,
+                    scanProgress = null,
                     statusMessage = null,
+                    categoryFilter = filter,
+                    scannedFilter = filter,
                     scanResult = result,
-                    selected = preselected.toSet(),
-                    fileProgress = emptyMap()
+                    // Nothing is selected yet: the first thing the user is told
+                    // is how many files there are, then they choose to take all
+                    // of them or a range of them.
+                    selected = emptySet(),
+                    stage = SelectionStage.CHOOSE
                 )
-                if (result.files.isEmpty()) {
-                    _events.tryEmit("Scan complete with no matching files.")
-                }
-            } catch (e: kotlinx.coroutines.CancellationException) {
+                refreshEmptyResult()
+            } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 if (token == scanToken) {
                     _uiState.value = _uiState.value.copy(
                         analyzing = false,
+                        scanProgress = null,
+                        statusMessage = null,
                         errorMessage = e.message ?: "Analysis failed."
                     )
                 }
@@ -165,128 +399,300 @@ class DownloadViewModel : ViewModel() {
         }
     }
 
+    /**
+     * Stops an in-flight analysis. A channel with tens of thousands of messages
+     * can take minutes to walk, so the user must be able to back out.
+     */
+    fun cancelScan() {
+        if (!_uiState.value.analyzing) return
+        scanToken++ // invalidate anything the running scan might still return
+        scanJob?.cancel()
+        scanJob = null
+        _uiState.value = _uiState.value.copy(
+            analyzing = false,
+            scanProgress = null,
+            statusMessage = "Analysis stopped."
+        )
+    }
+
+    /**
+     * What the scan is doing right now.
+     *
+     * The waiting case is called out rather than hidden: it is when the scan
+     * pauses for seconds on a large channel, and previously the only signal was
+     * a frozen count — indistinguishable from a hung scan.
+     */
+    private fun scanProgressText(scanned: Int, found: Int, waitingForHistory: Boolean): String =
+        if (waitingForHistory) {
+            "Waiting for Telegram to load older messages… $scanned checked, $found found"
+        } else {
+            "Scanning… $scanned message(s) checked, $found file(s) found"
+        }
+
+    /** The categories a scan for [filter] should collect. */
+    private fun categoriesFor(filter: String): Set<String> =
+        if (filter == AppPreferences.CATEGORY_ALL) AppPreferences.MEDIA_CATEGORIES.toSet()
+        else setOf(filter)
+
+    /**
+     * "Download all N files" — takes everything the scan found.
+     *
+     * Selecting rather than starting, so the size is stated before anything is
+     * fetched. Someone on a metered connection needs that chance to back out.
+     */
+    fun chooseAll() {
+        val files = _uiState.value.visibleFiles
+        if (files.isEmpty()) return
+        _uiState.value = _uiState.value.copy(
+            selected = files.map { it.messageId }.toSet(),
+            stage = SelectionStage.CONFIRM,
+            statusMessage = "All ${files.size} file(s) selected.",
+            errorMessage = null
+        )
+    }
+
+    /** "Select a range" — opens the picker without selecting anything yet. */
+    fun chooseRange() {
+        _uiState.value = _uiState.value.copy(
+            stage = SelectionStage.RANGE,
+            statusMessage = null,
+            errorMessage = null
+        )
+    }
+
+    /** Returns to the two starting choices, dropping the selection. */
+    fun backToChoose() {
+        _uiState.value = _uiState.value.copy(
+            selected = emptySet(),
+            stage = SelectionStage.CHOOSE,
+            statusMessage = null,
+            errorMessage = null
+        )
+    }
+
+    /**
+     * Re-queues failed downloads — one file, or all of them.
+     *
+     * The retry runs through the same engine as any other download, so it
+     * survives leaving the app, resumes after a process death, and respects the
+     * Wi-Fi-only setting (whose refusal is shown as an error, not swallowed).
+     */
+    fun retryFailedDownloads(context: Context, messageId: Long? = null) {
+        val blocked = DownloadManager.retryFailed(context.applicationContext, messageId)
+        _uiState.value = _uiState.value.copy(
+            errorMessage = blocked,
+            statusMessage = if (blocked == null) "Retrying failed download(s)…" else null
+        )
+    }
+
+    /** Forgets the failed downloads without retrying them. */
+    fun dismissFailedDownloads(context: Context) {
+        DownloadManager.dismissFailures(context.applicationContext)
+    }
+
+    /**
+     * Selects the 1-based inclusive range [from] to [to] of the currently
+     * visible files.
+     *
+     * This is the answer to a channel holding tens of thousands of matches:
+     * asking someone to scroll and tick 20 rows out of 50,000 is not a usable
+     * selection method. The range is expressed in the same numbering the result
+     * list shows, and every rejection explains itself so a screen reader user
+     * hears why the range was refused.
+     */
+    fun selectRange(from: Int, to: Int) {
+        val state = _uiState.value
+        val files = state.visibleFiles
+        if (files.isEmpty()) {
+            _uiState.value = state.copy(
+                errorMessage = "Analyze a link first, then choose a range."
+            )
+            return
+        }
+        val total = files.size
+        val problem = when {
+            from < 1 || to < 1 -> "Enter a file number of 1 or more."
+            from > total || to > total ->
+                "This list has $total file(s). Enter numbers between 1 and $total."
+            from > to -> "The first number must not be greater than the last number."
+            else -> null
+        }
+        if (problem != null) {
+            _uiState.value = state.copy(errorMessage = problem)
+            return
+        }
+
+        val chosen = files.subList(from - 1, to).map { it.messageId }
+        // Remembered only once the range proved valid, so a rejected entry
+        // never overwrites a range that worked. Per channel when one is loaded,
+        // otherwise it becomes the app-wide default.
+        val range = SavedRange(from = from, to = to)
+        _lastRange.value = range
+        if (currentChatId == null) {
+            AppContainer.appPreferences.setLastRange(range)
+        } else {
+            rememberOnCurrentChannel { it.copy(rangeFrom = from, rangeTo = to) }
+        }
+        // Applying a range confirms the selection, which is what reveals the
+        // Start download action and the total size.
+        _uiState.value = state.copy(
+            selected = chosen.toSet(),
+            stage = SelectionStage.CONFIRM,
+            errorMessage = null,
+            statusMessage = "Selected ${chosen.size} file(s), number $from to $to."
+        )
+    }
+
     fun toggleSelection(messageId: Long) {
+        // Only rows the user can actually see may be toggled.
+        if (_uiState.value.visibleFiles.none { it.messageId == messageId }) return
         val current = _uiState.value
         val next = current.selected.toMutableSet()
         if (!next.add(messageId)) {
             next.remove(messageId)
         }
-        _uiState.value = current.copy(selected = next)
-    }
-
-    fun selectAll() {
-        val files = _uiState.value.scanResult?.files ?: return
-        _uiState.value = _uiState.value.copy(selected = files.map { it.messageId }.toSet())
-    }
-
-    fun clearSelection() {
-        _uiState.value = _uiState.value.copy(selected = emptySet())
+        // Hand-picking rows is its own way of confirming a selection, so it
+        // moves the sheet forward too; emptying it goes back to the start.
+        _uiState.value = current.copy(
+            selected = next,
+            stage = if (next.isEmpty()) SelectionStage.CHOOSE else SelectionStage.CONFIRM
+        )
     }
 
     fun dismissResults() {
-        messageIdsByFileId.clear()
         _uiState.value = _uiState.value.copy(
             scanResult = null,
+            scannedFilter = null,
             selected = emptySet(),
-            fileProgress = emptyMap()
+            stage = SelectionStage.CHOOSE,
+            emptyResult = null
         )
-    }
-
-    fun startDownload(context: Context) {
-        val state = _uiState.value
-        val result = state.scanResult ?: return
-        if (state.selected.isEmpty() || state.downloading) return
-
-        // Resolve messages from the current scan token only — a stale token's
-        // registry entry was already evicted by ScanRegistry.record().
-        val chatId = repository.chatIdForToken(scanToken)
-        val messages = repository.messagesForToken(scanToken)
-
-        _uiState.value = state.copy(
-            downloading = true,
-            progressText = "Starting…",
-            // Seed every selected row at 0% so bars appear immediately.
-            fileProgress = result.files
-                .filter { it.messageId in state.selected }
-                .associate { it.messageId to FileProgress(0L, it.sizeBytes) }
-        )
-        downloadJob?.cancel()
-        downloadJob = viewModelScope.launch {
-            try {
-                // Public, user-visible location: Download/SmartTG/<channel>/<category>/.
-                // Requires all-files access (Android 11+) or legacy storage grants;
-                // the PermissionsScreen gate guarantees this before downloads start.
-                val baseDir = File(
-                    Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
-                    "SmartTG/${result.sourceTitle}"
-                )
-                var completed = 0
-                var failed = 0
-                for (file in result.files) {
-                    if (file.messageId !in state.selected) continue
-                    val message = messages[file.messageId]
-                        ?: repository.getMessage(chatId, file.messageId)
-                    if (message == null) {
-                        failed++
-                        recordHistory(chatId, result.sourceTitle, file, null)
-                        continue
-                    }
-                    try {
-                        val path = repository.downloadFile(
-                            message = message,
-                            destinationDir = File(baseDir, file.category)
-                        )
-                        recordHistory(chatId, result.sourceTitle, file, path)
-                    } catch (e: kotlinx.coroutines.CancellationException) {
-                        throw e
-                    } catch (e: Exception) {
-                        failed++
-                        recordHistory(chatId, result.sourceTitle, file, null)
-                    }
-                    completed++
-                    _uiState.value = _uiState.value.copy(
-                        progressText = "Downloaded $completed/${state.selected.size}: ${file.name}"
-                    )
-                }
-                _events.tryEmit(
-                    if (failed == 0) "Download completed."
-                    else "Finished with $failed failed file(s)."
-                )
-            } catch (e: kotlinx.coroutines.CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                _events.tryEmit(e.message ?: "Download failed.")
-            } finally {
-                // Keep the final per-file percentages visible until the sheet is
-                // dismissed; only clear the run-level text.
-                _uiState.value = _uiState.value.copy(downloading = false, progressText = null)
-            }
-        }
     }
 
     /**
-     * Persists a finished download attempt (success or failure) to Room so it
-     * appears on the History tab and survives restarts. Keyed by messageId;
-     * re-downloading the same message replaces its row with a fresh timestamp.
+     * Hands the selected files to [DownloadManager] and returns immediately.
+     *
+     * Nothing here waits for a download: the engine runs it in a foreground
+     * service, so the batch continues if the user leaves the app or this
+     * ViewModel goes away.
      */
-    private suspend fun recordHistory(
-        chatId: Long,
-        sourceTitle: String,
-        file: TelegramRepository.ScannedFile,
-        localPath: String?
-    ) {
-        AppContainer.historyDao.upsert(
-            DownloadHistoryEntity(
-                messageId = file.messageId,
-                chatId = chatId,
-                fileName = file.name,
-                category = file.category,
-                sourceTitle = sourceTitle,
-                sizeBytes = file.sizeBytes,
-                completedAtEpochMs = System.currentTimeMillis(),
-                localPath = localPath,
-                succeeded = localPath != null
-            )
+    fun startDownload(context: Context) {
+        val state = _uiState.value
+        val result = state.scanResult ?: return
+        val targets = state.visibleSelected
+        if (targets.isEmpty() || state.downloading) return
+
+        val appContext = context.applicationContext
+
+        // Honour the connection choice from Settings before fetching anything.
+        NetworkGuard.blockedReason(
+            appContext,
+            AppContainer.appPreferences.downloadNetwork.value
+        )?.let { blocked ->
+            _uiState.value = state.copy(errorMessage = blocked)
+            return
+        }
+
+        // Resolve the chat from the current scan token only — a stale token's
+        // registry entry was already evicted by ScanRegistry.record().
+        val chatId = repository.chatIdForToken(scanToken)
+
+        DownloadManager.enqueue(
+            context = appContext,
+            items = targets.map { file ->
+                QueuedDownload(
+                    messageId = file.messageId,
+                    fileId = file.fileId,
+                    chatId = chatId,
+                    fileName = file.name,
+                    category = file.category,
+                    sourceTitle = result.sourceTitle,
+                    sizeBytes = file.sizeBytes
+                )
+            }
         )
+        _uiState.value = state.copy(errorMessage = null)
+    }
+
+    /**
+     * Recomputes [UiState.emptyResult] for the current scan + filter.
+     *
+     * The two cases are kept distinct on purpose: "the link has nothing
+     * downloadable" and "nothing matches your filter" need different fixes
+     * from the user, and merging them into one message would send someone
+     * hunting for content that is actually there.
+     */
+    private fun refreshEmptyResult() {
+        val state = _uiState.value
+        val result = state.scanResult
+        if (result == null) {
+            _uiState.value = state.copy(emptyResult = null)
+            return
+        }
+        val filter = state.categoryFilter
+        val all = filter == AppPreferences.CATEGORY_ALL
+        val visited = result.scannedMessages
+        // An unfinished walk must never be reported as "the channel has none",
+        // which is exactly how a large channel came back looking empty.
+        if (result.files.isEmpty() && result.historyIncomplete) {
+            _uiState.value = state.copy(
+                emptyResult = EmptyResult(
+                    title = "Scan incomplete",
+                    detail = "\"${result.sourceTitle}\" has more messages than Telegram had " +
+                        "finished loading, so this scan only reached $visited of them. " +
+                        "Analyze the link again to pick up where it left off."
+                )
+            )
+            return
+        }
+        // A truncated scan must never read as "that is the whole channel".
+        val limitNote = if (result.limitReached) {
+            " Note: the scan stopped at the " +
+                "${AppPreferences.scanLimitLabel(result.fileLimit)}-file limit for this " +
+                "channel, so older files were not examined — use \"Search deeper\" to go further."
+        } else {
+            ""
+        }
+        // What the walk passed over on its way through. This is what lets an
+        // empty answer point at the rest of the channel instead of leaving the
+        // user to guess which file type to try next.
+        val othersNote = if (!all && result.otherMediaCount > 0) {
+            " It does contain about ${result.otherMediaCount} other media file(s), " +
+                "so try another file type."
+        } else {
+            ""
+        }
+        val empty = when {
+            result.files.isEmpty() -> EmptyResult(
+                title = if (all) "No files found" else "No $filter files found",
+                detail = buildString {
+                    append("\"${result.sourceTitle}\" was analyzed — ")
+                    append("$visited message(s) scanned — and contains no downloadable ")
+                    append(
+                        if (all) "audio, video, images or documents."
+                        else "$filter files."
+                    )
+                    append(othersNote)
+                    append(limitNote)
+                }
+            )
+            state.visibleFiles.isEmpty() -> EmptyResult(
+                title = "No $filter files found",
+                detail = "This link has ${result.files.size} downloadable file(s) from the " +
+                    "loaded scan, but none are in the \"$filter\" filter." + limitNote
+            )
+            else -> null
+        }
+        _uiState.value = state.copy(emptyResult = empty)
+    }
+
+    /** Drops selections that the active filter no longer shows. */
+    private fun pruneSelectionToVisible() {
+        val state = _uiState.value
+        if (state.selected.isEmpty()) return
+        val visibleIds = state.visibleFiles.map { it.messageId }.toSet()
+        if (state.selected.any { it !in visibleIds }) {
+            _uiState.value = state.copy(selected = state.selected.intersect(visibleIds))
+        }
     }
 }

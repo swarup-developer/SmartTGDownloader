@@ -26,18 +26,23 @@ android {
         // TDLib core AAR requires API 26+
         minSdk = 26
         targetSdk = 36
-        versionCode = 5
-        versionName = "2.1.0"
+        versionCode = 6
+        versionName = "2.2.0"
 
-        // CI can restrict native ABIs (e.g. ARM-only releases) via -PabiFilters.
-        // AGP 9 defaults to the host ABI (x86_64) when no explicit NDK abiFilters
-        // are set, so release builds must pass ARM ABIs explicitly.
+        // CI can restrict native ABIs via -PabiFilters (e.g. an ARM-only
+        // release).
+        //
+        // ARM only: 64-bit phones plus older 32-bit ARM phones. The x86/
+        // x86_64 emulator natives are excluded deliberately — the app is not
+        // supported on emulators, so shipping ~53 MB of Intel natives would
+        // only bloat the APK. The APK is NOT split; a single universal ARM
+        // APK is produced. Size is handled by the packaging block below.
         val requestedAbis = (project.findProperty("abiFilters") as String?)
             ?.split(",")
             ?.map { it.trim() }
             ?.filter { it.isNotEmpty() }
             ?.takeIf { it.isNotEmpty() }
-            ?: listOf("arm64-v8a", "armeabi-v7a", "x86_64") // local dev default
+            ?: listOf("arm64-v8a", "armeabi-v7a")
         ndk {
             abiFilters.clear()
             abiFilters.addAll(requestedAbis)
@@ -65,6 +70,21 @@ android {
     }
 
     buildTypes {
+        debug {
+            // Unminified by default: a debug APK has to keep readable stack
+            // traces. Compose plus the extended Material icon set still leave
+            // tens of MB of unreachable code in the DEX, though, so `-PminifyDebug=true`
+            // opts into an R8-shrunk debug build for a much smaller sideload.
+            if ((project.findProperty("minifyDebug") as String?)?.toBoolean() == true) {
+                isMinifyEnabled = true
+                isShrinkResources = true
+                proguardFiles(
+                    getDefaultProguardFile("proguard-android-optimize.txt"),
+                    "proguard-rules.pro"
+                )
+            }
+        }
+
         release {
             isMinifyEnabled = true
             isShrinkResources = true
@@ -94,6 +114,14 @@ android {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
+        jniLibs {
+            // Store the TDLib natives deflate-compressed instead of as raw
+            // uncompressed pages. ~22.7 MB arm64-v8a libtdjni.so ships as
+            // ~9.8 MB; the platform extracts them once at install time. This
+            // is the single biggest APK-size lever available without splitting
+            // the APK. Keep it on for every build type.
+            useLegacyPackaging = true
+        }
     }
 }
 
@@ -110,7 +138,9 @@ dependencies {
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-extended")
-    debugImplementation("androidx.compose.ui:ui-tooling")
+    // NOTE: no debugImplementation(ui-tooling) — the project has no @Preview
+    // composables, and ui-tooling added several MB to every debug APK. Add it
+    // back locally if you start using previews.
 
     implementation("androidx.core:core-ktx:1.17.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.9.4")

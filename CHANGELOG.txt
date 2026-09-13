@@ -1,5 +1,73 @@
 SmartTG Downloader Changelog
 ========================================================================
+Version: 2.2.0 / 8.8.0
+Build/Version Code: 6 / 8.8.0 (Android 2.2.0 / Windows 8.8.0)
+Release Date: September 13, 2026
+========================================================================
+
+SUMMARY OF CHANGES:
+Android 2.2.0 keeps downloads running after you leave the app, lets a channel
+holding tens of thousands of files be narrowed to the ones you actually want
+before anything is fetched, and fixes a history-walk bug that made large
+channels look empty. Windows is unchanged at 8.8.0.
+
+[ADDED]
+- Android: downloads now run in a foreground service with a progress
+  notification, so a batch continues after leaving the app. The pending queue
+  is persisted and resumes after a process restart, and TDLib's own cache
+  resumes a partly downloaded file instead of refetching it.
+- Android: download failure handling - each file is retried twice with backoff
+  before being reported, with its reason and a Retry action on Home, in the
+  results list, in the completion notification, and in History.
+- Android: per-channel download preferences (file type, range, scan limit)
+  keyed by the resolved Telegram chat id, with per-channel and forget-all
+  controls in Settings.
+- Android: range selection in the results panel by file number, plus Newest
+  10/20/50/100 presets; the last applied range is remembered per channel.
+- Android: a scan limit per channel (100 / 500 / 1,000 / 5,000 / All), with a
+  Search deeper step offered where a truncated scan is reported.
+- Android: download connection choice (any connection, or Wi-Fi only), enforced
+  before every download including retries.
+- Android: OTP resend on Telegram's own escalating cooldown (30s / 50s / 60s).
+- Android: unit tests (JUnit 4, JVM) for the preference precedence, range
+  seeding and scan-limit escalation rules, and for the history paging policy.
+
+[CHANGED]
+- Android: the permission screen is gone. Downloads are published through
+  MediaStore into Download/SmartTG/<channel>/<category>/ without any storage
+  permission on Android 10+; Android 8-9 request the legacy grant once and
+  fall back to app storage when it is declined.
+- Android: analysis scans only the file type you choose. The link is pasted
+  first, the file-type step appears beneath it, and the scan then looks for
+  that type alone - so a large channel is no longer trawled for media nobody
+  asked for.
+- Android: the results panel states what it found and asks what to take
+  ("N files found - download all, or select a range?"), then shows the selected
+  count and total download size before Start download.
+- Android: one filter list everywhere, the one Settings offers; History no
+  longer adds a chip per channel.
+- Android: the debug APK no longer ships emulator or 32-bit x86 natives and
+  stores its ARM natives compressed - 81.2 MB before, about 38 MB now, or
+  ~22.9 MB with -PminifyDebug=true. Still a single universal APK, not split.
+
+[FIXED]
+- Android: a large channel could report zero files, or a single file. The
+  history walk treated a short or empty page as the end of the chat, but TDLib
+  answers from the history it has loaded and back-fills the rest in the
+  background. The walk now retries, drops the page-boundary message it used to
+  collect twice, and marks a provably truncated scan as incomplete with a Scan
+  again action instead of claiming the channel has no such files.
+- Android: launching the app showed a blank screen. The Compose root shared its
+  name with the Application class, so the content lambda constructed an
+  Application object and composed nothing.
+- Android: the OTP step was silent and could not be resent. It now announces
+  "OTP sent successfully" once per request, and the resend button counts down
+  Telegram's own cooldown in its label and state description.
+- Android: the Get started screen read out "bullet, bullet, bullet" instead of
+  the feature list; the bullet glyph is now decorative and carries no semantics.
+- Android: a failed download could not be retried without redoing the analysis,
+  and History offered no way to retry a failed entry.
+
 Version: 2.1.0 / 8.8.0
 Build/Version Code: 5 / 8.8.0 (Android 2.1.0 / Windows 8.8.0)
 Release Date: September 12, 2026

@@ -6,17 +6,22 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
-    <!-- Storage: a bulk media downloader must save files into the user's
-         public Download folder, which scoped storage forbids. Android 11+
-         grants this via the All-files-access settings page; Android 8-10 via
-         the classic runtime prompt (declared below, capped at API 29). -->
-    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+    <!-- Held only while a download is running: without it the CPU can suspend
+         with the screen off and the transfer stalls mid-file. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- Storage: downloads land in the user's public Download folder.
+         Android 10+ does this through MediaStore.Downloads, which needs NO
+         permission at all (see data/DownloadsStore.kt) — no MANAGE_EXTERNAL_STORAGE,
+         no all-files settings page.
+         Only Android 8 and 9 lack a scoped-storage write API, so the classic
+         runtime grant stays declared but is capped there and is requested at
+         most once, lazily, when a download actually starts. -->
     <uses-permission
         android:name="android.permission.READ_EXTERNAL_STORAGE"
-        android:maxSdkVersion="29" />
+        android:maxSdkVersion="28" />
     <uses-permission
         android:name="android.permission.WRITE_EXTERNAL_STORAGE"
-        android:maxSdkVersion="29" />
+        android:maxSdkVersion="28" />
     <!-- In-app updates: installing a downloaded APK needs the install-packages
          consent prompt on Android 8+. -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
@@ -26,7 +31,6 @@
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
-        android:requestLegacyExternalStorage="true"
         android:supportsRtl="true"
         android:theme="@style/Theme.SmartTGDownloader">
 
@@ -39,6 +43,13 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Keeps a download running while the user is elsewhere and shows its
+             progress. Started only from the UI, never exported. -->
+        <service
+            android:name=".data.DownloadService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
 
         <!-- Lets other apps open files saved in our external files dir. -->
         <provider

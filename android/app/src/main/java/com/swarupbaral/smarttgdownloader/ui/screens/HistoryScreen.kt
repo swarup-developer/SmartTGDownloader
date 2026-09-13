@@ -2,9 +2,9 @@ package com.swarupbaral.smarttgdownloader.ui.screens
 
 import android.content.Context
 import android.content.Intent
-import android.os.Environment
-import android.webkit.MimeTypeMap
+import android.net.Uri
 import android.widget.Toast
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -16,15 +16,14 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Error
-import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -36,10 +35,11 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -48,8 +48,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
@@ -59,15 +61,22 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.swarupbaral.smarttgdownloader.AppContainer
+import com.swarupbaral.smarttgdownloader.data.AppPreferences
 import com.swarupbaral.smarttgdownloader.data.DownloadHistoryEntity
+import com.swarupbaral.smarttgdownloader.data.DownloadManager
+import com.swarupbaral.smarttgdownloader.data.DownloadsStore
+import com.swarupbaral.smarttgdownloader.data.NetworkGuard
+import com.swarupbaral.smarttgdownloader.data.QueuedDownload
 import java.io.File
 import java.text.DateFormat
 import java.util.Date
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -76,20 +85,26 @@ class HistoryViewModel : ViewModel() {
 
     private val allHistory = AppContainer.historyDao.observeAll()
 
-    /** Active filter: matches an entry's category OR source title; null = all. */
-    private val activeFilter = MutableStateFlow<String?>(null)
+    /**
+     * Active filter, always one of [AppPreferences.DOWNLOAD_CATEGORIES].
+     *
+     * Filtering is by category only. An earlier version also offered a chip per
+     * channel name, which produced an unmanageable row of options — the filter
+     * set is now identical to the one Settings offers, and nothing else.
+     */
+    private val activeFilter = MutableStateFlow(AppPreferences.CATEGORY_ALL)
 
     val history: StateFlow<List<DownloadHistoryEntity>> =
-        kotlinx.coroutines.flow.combine(allHistory, activeFilter) { list, filter ->
-            if (filter == null) list
-            else list.filter { it.category == filter || it.sourceTitle == filter }
+        combine(allHistory, activeFilter) { list, filter ->
+            if (filter == AppPreferences.CATEGORY_ALL) list
+            else list.filter { it.category == filter }
         }.stateIn(
             scope = viewModelScope,
             started = SharingStarted.WhileSubscribed(5_000),
             initialValue = emptyList()
         )
 
-    fun setFilter(value: String?) {
+    fun setFilter(value: String) {
         activeFilter.value = value
     }
 
@@ -100,9 +115,13 @@ class HistoryViewModel : ViewModel() {
         initialValue = emptyList()
     )
 
-    /** Message ids with a re-download currently in flight. */
-    private val _reDownloading = MutableStateFlow<Set<Long>>(emptySet())
-    val reDownloading: StateFlow<Set<Long>> = _reDownloading.asStateFlow()
+    /**
+     * Message ids queued or in flight, so rows can show a spinner.
+     *
+     * Sourced from the engine rather than tracked locally: the download may have
+     * been started from Home, or may have outlived this screen entirely.
+     */
+    val reDownloading: StateFlow<Set<Long>> = DownloadManager.pendingIds
 
     fun delete(entry: DownloadHistoryEntity) {
         viewModelScope.launch { AppContainer.historyDao.deleteByMessageId(entry.messageId) }
@@ -112,24 +131,45 @@ class HistoryViewModel : ViewModel() {
         viewModelScope.launch { AppContainer.historyDao.clearAll() }
     }
 
-    /** The downloaded file if it still exists on disk, else null. */
-    fun fileOf(entry: DownloadHistoryEntity): File? {
-        val path = entry.localPath ?: return null
-        val file = File(path)
-        return if (file.exists() && file.length() > 0) file else null
+    /**
+     * True when the entry's file is still present where it was saved.
+     *
+     * Suspend + IO on purpose: for a MediaStore URI this is an IPC round-trip
+     * to the media provider, which must never run while the history list is
+     * being measured on the main thread.
+     */
+    suspend fun fileExists(context: Context, entry: DownloadHistoryEntity): Boolean {
+        val location = entry.localPath ?: return false
+        return withContext(Dispatchers.IO) { DownloadsStore.exists(context, location) }
     }
 
-    /** Opens a completed download in an external app via FileProvider. */
+    /**
+     * Opens a completed download.
+     *
+     * Files live in the user's Download folder, reached either by MediaStore
+     * `content://` URI (Android 10+) or by path (older devices, or the
+     * app-private fallback), so both forms have to be handled.
+     */
     fun openFile(context: Context, entry: DownloadHistoryEntity) {
-        val file = fileOf(entry) ?: return
-        val uri = FileProvider.getUriForFile(
-            context,
-            context.packageName + ".fileprovider",
-            file
-        )
-        val intent = Intent(Intent.ACTION_VIEW).apply {
-            setDataAndType(uri, mimeFor(entry))
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        val location = entry.localPath ?: return
+        val mime = DownloadsStore.mimeFor(entry.fileName, entry.category)
+        val intent = if (location.startsWith("content://")) {
+            Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(Uri.parse(location), mime)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+        } else {
+            val file = File(location)
+            if (!file.exists()) return
+            val uri = FileProvider.getUriForFile(
+                context,
+                context.packageName + ".fileprovider",
+                file
+            )
+            Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, mime)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
         }
         runCatching {
             context.startActivity(Intent.createChooser(intent, "Open with"))
@@ -139,67 +179,39 @@ class HistoryViewModel : ViewModel() {
     }
 
     /**
-     * Re-fetches the message from Telegram and downloads it again into the
-     * same location, refreshing the row on success.
+     * Re-fetches the message from Telegram and saves it again.
+     *
+     * Queued through [DownloadManager] like any other download, so it survives
+     * this screen being closed, writes its own history row, and resumes after a
+     * process death instead of being lost mid-flight.
      */
     fun reDownload(context: Context, entry: DownloadHistoryEntity) {
-        if (entry.messageId in _reDownloading.value) return
-        _reDownloading.value = _reDownloading.value + entry.messageId
-        viewModelScope.launch {
-            try {
-                val message = AppContainer.repository.getMessage(entry.chatId, entry.messageId)
-                if (message == null) {
-                    Toast.makeText(
-                        context,
-                        "Message is no longer available in the channel.",
-                        Toast.LENGTH_LONG
-                    ).show()
-                    return@launch
-                }
-                val path = AppContainer.repository.downloadFile(
-                    message = message,
-                    destinationDir = localDirFor(context, entry)
-                )
-                AppContainer.historyDao.upsert(
-                    entry.copy(
-                        localPath = path,
-                        succeeded = true,
-                        completedAtEpochMs = System.currentTimeMillis()
-                    )
-                )
-                Toast.makeText(context, "Downloaded ${entry.fileName}", Toast.LENGTH_SHORT).show()
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                Toast.makeText(
-                    context,
-                    e.message ?: "Re-download failed.",
-                    Toast.LENGTH_LONG
-                ).show()
-            } finally {
-                _reDownloading.value = _reDownloading.value - entry.messageId
-            }
+        if (entry.messageId in DownloadManager.pendingIds.value) return
+        // Same connection rule as a fresh download.
+        NetworkGuard.blockedReason(
+            context,
+            AppContainer.appPreferences.downloadNetwork.value
+        )?.let { blocked ->
+            Toast.makeText(context, blocked, Toast.LENGTH_LONG).show()
+            return
         }
-    }
-
-    private fun localDirFor(context: Context, entry: DownloadHistoryEntity): File {
-        // Must mirror DownloadViewModel's location: Download/SmartTG/<channel>/<category>/.
-        val base = File(
-            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
-            "SmartTG/${entry.sourceTitle}"
+        DownloadManager.enqueue(
+            context = context.applicationContext,
+            items = listOf(
+                QueuedDownload(
+                    messageId = entry.messageId,
+                    // A history row has no TDLib file id; the engine still marks
+                    // the row complete from the bytes it actually fetched.
+                    fileId = 0,
+                    chatId = entry.chatId,
+                    fileName = entry.fileName,
+                    category = entry.category,
+                    sourceTitle = entry.sourceTitle,
+                    sizeBytes = entry.sizeBytes
+                )
+            )
         )
-        return File(base, entry.category)
-    }
-
-    private fun mimeFor(entry: DownloadHistoryEntity): String {
-        val ext = entry.fileName.substringAfterLast('.', "").lowercase()
-        MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext)?.let { return it }
-        return when (entry.category) {
-            "Audio" -> "audio/*"
-            "Video" -> "video/*"
-            "Images" -> "image/*"
-            else -> "application/octet-stream"
-        }
+        Toast.makeText(context, "Re-download started", Toast.LENGTH_SHORT).show()
     }
 }
 
@@ -213,74 +225,66 @@ fun HistoryScreen(
     val reDownloading by viewModel.reDownloading.collectAsState()
     val context = LocalContext.current
     var pendingClear by remember { mutableStateOf(false) }
-    var activeFilter by remember { mutableStateOf<String?>(null) }
-
-    // Distinct filter values from the UNFILTERED history: categories first,
-    // then source titles, so chips remain available while a filter is active.
-    val categories = allEntries.map { it.category }.distinct()
-    val sources = allEntries.map { it.sourceTitle }.distinct()
-    val filterValues = categories + sources
+    var activeFilter by remember { mutableStateOf(AppPreferences.CATEGORY_ALL) }
 
     Column(
         modifier = Modifier
             .fillMaxSize()
             .padding(horizontal = 16.dp)
     ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                "Download history",
+                style = MaterialTheme.typography.titleLarge,
+                modifier = Modifier
+                    .weight(1f)
+                    .semantics { heading() }
+            )
+            if (allEntries.isNotEmpty()) {
+                TextButton(onClick = { pendingClear = true }) { Text("Clear all") }
+            }
+        }
+
+        if (allEntries.isNotEmpty()) {
+            Text(
+                "Filter",
+                style = MaterialTheme.typography.titleSmall,
+                modifier = Modifier.semantics { heading() }
+            )
+            Spacer(Modifier.height(8.dp))
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(vertical = 12.dp),
-                verticalAlignment = Alignment.CenterVertically
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Text(
-                    "Download history",
-                    style = MaterialTheme.typography.titleLarge,
-                    modifier = Modifier
-                        .weight(1f)
-                        .semantics { heading() }
-                )
-                if (history.isNotEmpty()) {
-                    TextButton(onClick = { pendingClear = true }) { Text("Clear all") }
-                }
-            }
-
-            if (filterValues.isNotEmpty()) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
+                // Exactly the Settings filter set — no per-channel chips.
+                for (category in AppPreferences.DOWNLOAD_CATEGORIES) {
+                    val isSelected = activeFilter == category
                     FilterChip(
-                        selected = activeFilter == null,
+                        selected = isSelected,
                         onClick = {
-                            activeFilter = null
-                            viewModel.setFilter(null)
+                            activeFilter = category
+                            viewModel.setFilter(category)
                         },
-                        label = { Text("All") },
+                        label = { Text(category) },
                         modifier = Modifier.semantics {
-                            stateDescription = "No filter applied"
+                            role = Role.RadioButton
+                            stateDescription = if (isSelected) "Selected" else "Not selected"
                         }
                     )
-                    for (value in filterValues) {
-                        FilterChip(
-                            selected = activeFilter == value,
-                            onClick = {
-                                activeFilter = if (activeFilter == value) null else value
-                                viewModel.setFilter(activeFilter)
-                            },
-                            label = { Text(value) },
-                            modifier = Modifier.semantics {
-                                stateDescription =
-                                    if (activeFilter == value) "Filtered" else "Tap to filter"
-                            }
-                        )
-                    }
                 }
-                Spacer(Modifier.height(4.dp))
             }
+            Spacer(Modifier.height(8.dp))
+        }
 
-            if (history.isEmpty()) {
+        when {
+            allEntries.isEmpty() -> {
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Text(
                         "No downloads yet.\nCompleted downloads will appear here.",
@@ -288,21 +292,45 @@ fun HistoryScreen(
                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
                     )
                 }
-            } else {
+            }
+            history.isEmpty() -> {
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text(
+                        "No \"$activeFilter\" downloads yet.\nChoose \"${AppPreferences.CATEGORY_ALL}\" to see everything.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                    )
+                }
+            }
+            else -> {
                 LazyColumn(
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                     modifier = Modifier.fillMaxSize()
                 ) {
                     items(history, key = { it.messageId }) { entry ->
-                        // Re-evaluated when the row's timestamp changes (e.g. after
-                        // a re-download) so the Open action tracks file existence.
-                        val fileExists = remember(entry.completedAtEpochMs, entry.localPath) {
-                            viewModel.fileOf(entry) != null
+                        // Probed asynchronously and re-run when the row's
+                        // timestamp changes (e.g. after a re-download), so the
+                        // Open action tracks file existence without blocking
+                        // the frame. The action stays hidden until the probe
+                        // confirms the file is really there.
+                        var exists by remember(
+                            entry.messageId,
+                            entry.completedAtEpochMs,
+                            entry.localPath
+                        ) {
+                            mutableStateOf(false)
+                        }
+                        LaunchedEffect(
+                            entry.messageId,
+                            entry.completedAtEpochMs,
+                            entry.localPath
+                        ) {
+                            exists = viewModel.fileExists(context, entry)
                         }
                         HistoryRow(
                             entry = entry,
                             isRedownloading = entry.messageId in reDownloading,
-                            fileExists = fileExists,
+                            fileExists = exists,
                             onDelete = { viewModel.delete(entry) },
                             onOpen = { viewModel.openFile(context, entry) },
                             onReDownload = { viewModel.reDownload(context, entry) }
@@ -311,6 +339,7 @@ fun HistoryScreen(
                 }
             }
         }
+    }
 
     if (pendingClear) {
         AlertDialog(
@@ -396,16 +425,25 @@ private fun HistoryRow(
                         onClick = onOpen,
                         modifier = Modifier.minimumInteractiveComponentSize()
                     ) {
-                        Icon(Icons.Filled.OpenInNew, contentDescription = "Open file")
+                        Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = "Open file")
                     }
                 }
-                if (entry.succeeded) {
-                    IconButton(
-                        onClick = onReDownload,
-                        modifier = Modifier.minimumInteractiveComponentSize()
-                    ) {
-                        Icon(Icons.Filled.Refresh, contentDescription = "Re-download")
-                    }
+                // Offered for failed rows too: retrying is exactly what a
+                // failed download needs, and it goes through the same engine
+                // (so it respects the Wi-Fi-only setting and survives the
+                // screen being closed).
+                IconButton(
+                    onClick = onReDownload,
+                    modifier = Modifier.minimumInteractiveComponentSize()
+                ) {
+                    Icon(
+                        Icons.Filled.Refresh,
+                        contentDescription = if (entry.succeeded) {
+                            "Re-download ${entry.fileName}"
+                        } else {
+                            "Retry ${entry.fileName}"
+                        }
+                    )
                 }
                 IconButton(
                     onClick = onDelete,
