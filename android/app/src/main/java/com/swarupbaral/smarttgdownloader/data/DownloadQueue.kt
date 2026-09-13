@@ -34,11 +34,39 @@ data class QueuedDownload(
  * Only the *remaining* items are stored, and the list is rewritten after each
  * file completes, so a process kill leaves an accurate resume point.
  */
+/**
+ * A whole selection the user asked for as a single .zip archive.
+ *
+ * [items] is the complete selection rather than a cursor, because the archive is
+ * written in one pass from the beginning: a run that was interrupted throws its
+ * half-written archive away and starts a new one instead of trying to splice
+ * into the middle of it. That restart is cheap rather than wasteful — TDLib
+ * keeps fetched files in its own cache, so the second pass reads them from disk
+ * instead of downloading them again.
+ *
+ * [fileName] and [folder] are decided when the request is made, so the archive
+ * ends up in the channel's folder next to where separate files would have gone.
+ */
+data class ZipRequest(
+    val fileName: String,
+    val folder: String,
+    val items: List<QueuedDownload>,
+    /**
+     * Whether the separate files are published as well as packed.
+     *
+     * Carried on the request rather than read from preferences at run time: a
+     * request can outlive the launch that made it, and it should still do what it
+     * was asked to do even if the setting has changed since.
+     */
+    val keepFiles: Boolean = false
+)
+
 object DownloadQueueStore {
 
     private const val PREFS_FILE = "smarttg_queue"
     private const val KEY_ITEMS = "pending_items"
     private const val KEY_FAILED = "failed_items"
+    private const val KEY_ZIP = "zip_request"
 
     private fun prefs(context: Context) =
         context.applicationContext.getSharedPreferences(PREFS_FILE, Context.MODE_PRIVATE)
@@ -82,7 +110,45 @@ object DownloadQueueStore {
         prefs(context).edit().remove(KEY_FAILED).apply()
     }
 
-    private fun encode(items: List<QueuedDownload>): String {
+    /**
+     * The selection the user asked for as one .zip archive, or null.
+     *
+     * Persisted like the queue, so an archive survives the process being killed
+     * and is written when the app is next opened rather than being lost with the
+     * screen that asked for it.
+     */
+    fun loadZipRequest(context: Context): ZipRequest? {
+        val raw = prefs(context).getString(KEY_ZIP, null) ?: return null
+        return runCatching {
+            val json = JSONObject(raw)
+            ZipRequest(
+                fileName = json.getString("fileName"),
+                folder = json.getString("folder"),
+                items = decodeItems(json.getJSONArray("items")),
+                // Absent in a request written before this existed, which meant
+                // exactly this: the archive only.
+                keepFiles = json.optBoolean("keepFiles", false)
+            )
+        }.getOrNull()
+    }
+
+    fun saveZipRequest(context: Context, request: ZipRequest) {
+        val json = JSONObject().apply {
+            put("fileName", request.fileName)
+            put("folder", request.folder)
+            put("items", encodeItems(request.items))
+            put("keepFiles", request.keepFiles)
+        }
+        prefs(context).edit().putString(KEY_ZIP, json.toString()).apply()
+    }
+
+    fun clearZipRequest(context: Context) {
+        prefs(context).edit().remove(KEY_ZIP).apply()
+    }
+
+    private fun encode(items: List<QueuedDownload>): String = encodeItems(items).toString()
+
+    private fun encodeItems(items: List<QueuedDownload>): JSONArray {
         val array = JSONArray()
         for (item in items) {
             array.put(
@@ -97,25 +163,25 @@ object DownloadQueueStore {
                 }
             )
         }
-        return array.toString()
+        return array
     }
 
     private fun decode(raw: String?): List<QueuedDownload> {
         if (raw == null) return emptyList()
-        return runCatching {
-            val array = JSONArray(raw)
-            (0 until array.length()).map { index ->
-                val item = array.getJSONObject(index)
-                QueuedDownload(
-                    messageId = item.getLong("messageId"),
-                    fileId = item.getInt("fileId"),
-                    chatId = item.getLong("chatId"),
-                    fileName = item.getString("fileName"),
-                    category = item.getString("category"),
-                    sourceTitle = item.getString("sourceTitle"),
-                    sizeBytes = item.getLong("sizeBytes")
-                )
-            }
-        }.getOrDefault(emptyList())
+        return runCatching { decodeItems(JSONArray(raw)) }.getOrDefault(emptyList())
     }
+
+    private fun decodeItems(array: JSONArray): List<QueuedDownload> =
+        (0 until array.length()).map { index ->
+            val item = array.getJSONObject(index)
+            QueuedDownload(
+                messageId = item.getLong("messageId"),
+                fileId = item.getInt("fileId"),
+                chatId = item.getLong("chatId"),
+                fileName = item.getString("fileName"),
+                category = item.getString("category"),
+                sourceTitle = item.getString("sourceTitle"),
+                sizeBytes = item.getLong("sizeBytes")
+            )
+        }
 }

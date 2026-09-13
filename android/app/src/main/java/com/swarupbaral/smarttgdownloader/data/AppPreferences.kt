@@ -212,6 +212,39 @@ class AppPreferences(context: Context) {
         _defaultCategory.value = value
     }
 
+    private val _zipKeepsFiles = MutableStateFlow(prefs.getBoolean(KEY_ZIP_KEEPS_FILES, false))
+
+    /**
+     * Whether "Download ZIP" also keeps the separate files it packs.
+     *
+     * Off by default: the archive is what the action is for, and keeping both
+     * costs twice the space. The choice sits beside the button rather than in
+     * Settings because it belongs to that action, and it is remembered so it is
+     * decided once rather than every batch.
+     */
+    val zipKeepsFiles: StateFlow<Boolean> = _zipKeepsFiles.asStateFlow()
+
+    fun setZipKeepsFiles(value: Boolean) {
+        prefs.edit().putBoolean(KEY_ZIP_KEEPS_FILES, value).apply()
+        _zipKeepsFiles.value = value
+    }
+
+    // --- One-time migrations ---------------------------------------------------
+
+    /**
+     * True once files left in the pre-2.2.0-final `Download/SmartTG/` tree have
+     * been moved into the per-channel layout.
+     *
+     * Only a pass that finished sets this, so a partial migration is retried on
+     * the next launch rather than being forgotten and leaving files stranded in
+     * a folder the app no longer writes to.
+     */
+    fun legacyMigrationDone(): Boolean = prefs.getBoolean(KEY_LEGACY_MIGRATION_DONE, false)
+
+    fun setLegacyMigrationDone(value: Boolean) {
+        prefs.edit().putBoolean(KEY_LEGACY_MIGRATION_DONE, value).apply()
+    }
+
     companion object {
         private const val PREFS_FILE = "smarttg_prefs"
         private const val KEY_AUTO_CHECK_ENABLED = "auto_check_enabled"
@@ -225,6 +258,8 @@ class AppPreferences(context: Context) {
         private const val KEY_SCAN_LIMIT = "scan_limit"
         private const val KEY_RANGE_FROM = "range_from"
         private const val KEY_RANGE_TO = "range_to"
+        private const val KEY_LEGACY_MIGRATION_DONE = "legacy_migration_done"
+        private const val KEY_ZIP_KEEPS_FILES = "zip_keeps_files"
 
         private const val DEFAULT_DYNAMIC_COLOR = false
 

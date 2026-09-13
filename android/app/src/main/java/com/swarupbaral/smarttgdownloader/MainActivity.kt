@@ -1,5 +1,7 @@
 package com.swarupbaral.smarttgdownloader
 
+import android.content.Context
+import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -46,6 +48,8 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.swarupbaral.smarttgdownloader.data.DownloadManager
+import com.swarupbaral.smarttgdownloader.data.DownloadsMigration
+import com.swarupbaral.smarttgdownloader.data.DownloadsStore
 import com.swarupbaral.smarttgdownloader.data.TelegramRepository
 import com.swarupbaral.smarttgdownloader.ui.screens.HistoryScreen
 import com.swarupbaral.smarttgdownloader.ui.screens.HomeScreen
@@ -58,8 +62,24 @@ import com.swarupbaral.smarttgdownloader.update.UpdatePrompt
 
 class MainActivity : ComponentActivity() {
 
+    /**
+     * A folder a notification asked to show, held until this activity is
+     * actually resumed.
+     *
+     * The notification's "Open folder" action cannot start a file manager from
+     * the background on Android 10+, so it starts this activity instead and the
+     * folder is opened here, from the foreground.
+     */
+    private var pendingFolderOpen: String? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Only a fresh start acts on the extra. On a configuration change the
+        // same intent is delivered again, and reopening a folder the user has
+        // already looked at and left would be a surprise.
+        if (savedInstanceState == null) {
+            pendingFolderOpen = intent?.getStringExtra(EXTRA_OPEN_FOLDER)
+        }
         // Opaque dark launch surface: kills the white window flash on the
         // dark-first app and guarantees a themed backdrop even if composition
         // is slow (previously a WHITE background here made startup look wrong
@@ -100,6 +120,38 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        // The activity is single-top, so a second tap on the notification action
+        // arrives here rather than through onCreate.
+        setIntent(intent)
+        pendingFolderOpen = intent.getStringExtra(EXTRA_OPEN_FOLDER)
+    }
+
+    /**
+     * Opens a requested folder now that the app is on screen.
+     *
+     * Consumed exactly once, so returning to the app later does not reopen a
+     * folder the user has already seen and left.
+     */
+    override fun onPostResume() {
+        super.onPostResume()
+        val folder = pendingFolderOpen ?: return
+        pendingFolderOpen = null
+        DownloadsStore.openFolder(this, folder)
+    }
+
+    companion object {
+        const val EXTRA_OPEN_FOLDER = "com.swarupbaral.smarttgdownloader.extra.OPEN_FOLDER"
+
+        /** Brings the app forward, carrying a folder to show once resumed. */
+        fun folderIntent(context: Context, folder: String): Intent =
+            Intent(context, MainActivity::class.java).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                putExtra(EXTRA_OPEN_FOLDER, folder)
+            }
     }
 }
 
@@ -186,6 +238,14 @@ fun SmartTGAppRoot(repository: TelegramRepository = AppContainer.repository) {
     // process. Independent of sign-in: a failure is worth reporting either way.
     LaunchedEffect(Unit) {
         DownloadManager.restoreFailedState(context)
+    }
+
+    // One-time: move anything left in the pre-2.2.0-final Download/SmartTG tree
+    // into the per-channel layout, so an update does not leave files sitting in
+    // a folder the app no longer writes to. Cheap on every later start — it is
+    // one flag read once it has nothing left to do.
+    LaunchedEffect(Unit) {
+        DownloadsMigration.runIfNeeded(context)
     }
 
     LaunchedEffect(authState) {

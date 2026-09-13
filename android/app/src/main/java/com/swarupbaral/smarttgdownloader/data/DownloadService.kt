@@ -125,10 +125,13 @@ class DownloadService : Service() {
     }
 
     private fun buildProgressNotification(state: DownloadManager.RunState): Notification {
-        val title = if (state.total > 1) {
-            "Downloading ${(state.completed + 1).coerceAtMost(state.total)} of ${state.total}"
-        } else {
-            "Downloading"
+        val title = when {
+            // Packing is local disk work, so progress is reported as files
+            // added to the archive rather than as a download.
+            state.packing -> "Creating ZIP"
+            state.total > 1 ->
+                "Downloading ${(state.completed + 1).coerceAtMost(state.total)} of ${state.total}"
+            else -> "Downloading"
         }
         return baseBuilder()
             .setContentTitle(title)
@@ -159,8 +162,30 @@ class DownloadService : Service() {
         if (state.failed > 0) {
             builder.addAction(0, "Retry failed", retryAction())
         }
+        // "Where did my files go?" answered from the notification, aimed at the
+        // channel folder the batch actually landed in. Only offered once a file
+        // really was saved — the folder exists from that moment.
+        state.lastSavedFolder?.let { folder ->
+            builder.addAction(0, "Open folder", openFolderAction(folder))
+        }
         return builder.build()
     }
+
+    /**
+     * Opens the folder from the notification.
+     *
+     * Routes through [MainActivity] rather than starting a file manager
+     * directly: a notification action may not start another app's activity from
+     * the background on Android 10+, and this app's own activity is the case the
+     * platform does allow. MainActivity opens the folder once it is resumed, so
+     * the launch happens from the foreground.
+     */
+    private fun openFolderAction(folder: String): PendingIntent = PendingIntent.getActivity(
+        this,
+        3,
+        MainActivity.folderIntent(this, folder),
+        PendingIntent.FLAG_IMMUTABLE
+    )
 
     private fun baseBuilder(): NotificationCompat.Builder =
         NotificationCompat.Builder(this, CHANNEL_ID)

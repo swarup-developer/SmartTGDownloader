@@ -8,7 +8,10 @@ import com.swarupbaral.smarttgdownloader.data.AppPreferences
 import com.swarupbaral.smarttgdownloader.data.ChannelDefaults
 import com.swarupbaral.smarttgdownloader.data.ChannelSettings
 import com.swarupbaral.smarttgdownloader.data.DownloadManager
+import com.swarupbaral.smarttgdownloader.data.DownloadsMigration
+import com.swarupbaral.smarttgdownloader.data.DownloadsStore
 import com.swarupbaral.smarttgdownloader.data.NetworkGuard
+import com.swarupbaral.smarttgdownloader.data.ZipRequest
 import com.swarupbaral.smarttgdownloader.data.QueuedDownload
 import com.swarupbaral.smarttgdownloader.data.SavedRange
 import com.swarupbaral.smarttgdownloader.data.TelegramRepository
@@ -101,7 +104,22 @@ class DownloadViewModel : ViewModel() {
          */
         val scannedFilter: String? = null,
         /** Why individual files failed, keyed by messageId, for row wording. */
-        val failures: Map<Long, String> = emptyMap()
+        val failures: Map<Long, String> = emptyMap(),
+        /**
+         * The engine's run, mirrored whole.
+         *
+         * The completion surface needs more than "is it running": the phase,
+         * the summary and the folder the files landed in. The status line stays
+         * free for scan messages rather than repeating the run's summary.
+         */
+        val runState: DownloadManager.RunState = DownloadManager.RunState(),
+        /**
+         * Whether "Download ZIP" should also keep the files it packs.
+         *
+         * Mirrored from preferences so the checkbox beside the ZIP button and the
+         * request that gets queued can never disagree.
+         */
+        val keepZipFiles: Boolean = false
     ) {
         /** Files from the last scan that pass the active filter. */
         val visibleFiles: List<TelegramRepository.ScannedFile>
@@ -174,6 +192,26 @@ class DownloadViewModel : ViewModel() {
             }
         }
 
+        // The ZIP-then-keep-files choice lives beside the ZIP button, and is
+        // remembered here rather than in the dialog so it is set once.
+        viewModelScope.launch {
+            AppContainer.appPreferences.zipKeepsFiles.collect { keep ->
+                _uiState.value = _uiState.value.copy(keepZipFiles = keep)
+            }
+        }
+
+        // The one-time folder migration reports here, so a user whose files were
+        // moved by an update is told where they went rather than discovering an
+        // empty folder. A StateFlow, so a report from before this screen existed
+        // still arrives.
+        viewModelScope.launch {
+            DownloadsMigration.lastReport.collect { report ->
+                report?.summary()?.let { message ->
+                    _uiState.value = _uiState.value.copy(statusMessage = message)
+                }
+            }
+        }
+
         // Mirror the engine's per-file progress onto the scanned rows.
         viewModelScope.launch {
             DownloadManager.fileProgress.collect { progress ->
@@ -196,12 +234,20 @@ class DownloadViewModel : ViewModel() {
                     } else {
                         null
                     },
-                    // A terminal run reports its own summary; otherwise leave the
-                    // last message standing so it stays readable.
-                    statusMessage = if (run.isTerminal) run.message else _uiState.value.statusMessage
+                    runState = run
                 )
             }
         }
+    }
+
+    /**
+     * Clears a finished run so the completion card goes away.
+     *
+     * Only the report is cleared: the files are in Downloads and the history
+     * entries stay, so nothing the user downloaded depends on this.
+     */
+    fun acknowledgeRun() {
+        DownloadManager.acknowledge()
     }
 
     fun updateLink(value: String) {
@@ -316,6 +362,20 @@ class DownloadViewModel : ViewModel() {
         analyze()
     }
 
+    /**
+     * Adopts [category] and starts the scan in one step.
+     *
+     * The type has to be settled before the walk begins — the scan collects one
+     * type — so the dialog that asks for it hands the answer straight here. Doing
+     * it in one call keeps the two from being separated by a recomposition in
+     * which the filter is set but nothing is scanning, or worse, scanning with
+     * the previous type.
+     */
+    fun analyzeWithFilter(category: String) {
+        setFilter(category)
+        analyze()
+    }
+
     fun analyze() {
         val link = _uiState.value.link.trim()
         if (link.isEmpty()) {
@@ -346,10 +406,10 @@ class DownloadViewModel : ViewModel() {
                 if (token != scanToken) return@launch
                 val settings = applyChannelSettings(source, _uiState.value.categoryFilter)
 
-                // Scan for the chosen type only. The user picks the file type
-                // before pressing Analyze, so the walk looks for exactly that —
-                // which also means a big channel is not trawled for media the
-                // user has already said they do not want.
+                // Scan for the chosen type only. The dialog that appears when
+                // Analyze is pressed has already settled which one, so the walk
+                // looks for exactly that — and "All" means every media type, so
+                // a big channel is never trawled for types the user ruled out.
                 val result = repository.scanChat(
                     source = source,
                     categories = categoriesFor(settings.filter),
@@ -599,19 +659,80 @@ class DownloadViewModel : ViewModel() {
 
         DownloadManager.enqueue(
             context = appContext,
-            items = targets.map { file ->
-                QueuedDownload(
-                    messageId = file.messageId,
-                    fileId = file.fileId,
-                    chatId = chatId,
-                    fileName = file.name,
-                    category = file.category,
-                    sourceTitle = result.sourceTitle,
-                    sizeBytes = file.sizeBytes
-                )
-            }
+            items = queuedItems(targets, result, chatId)
         )
         _uiState.value = state.copy(errorMessage = null)
+    }
+
+    /**
+     * Hands the selection to [DownloadManager] to be written as one .zip archive
+     * instead of as separate files.
+     *
+     * Same fetched copies either way, so this shares the connection check, the
+     * foreground service and the notification with a normal download; what
+     * differs is only where the bytes end up.
+     */
+    fun startZip(context: Context) {
+        val state = _uiState.value
+        val result = state.scanResult ?: return
+        val targets = state.visibleSelected
+        if (targets.isEmpty() || state.downloading) return
+
+        val appContext = context.applicationContext
+        NetworkGuard.blockedReason(
+            appContext,
+            AppContainer.appPreferences.downloadNetwork.value
+        )?.let { blocked ->
+            _uiState.value = state.copy(errorMessage = blocked)
+            return
+        }
+
+        val chatId = repository.chatIdForToken(scanToken)
+        val refusal = DownloadManager.enqueueZip(
+            appContext,
+            ZipRequest(
+                fileName = DownloadsStore.archiveName(
+                    sourceTitle = result.sourceTitle,
+                    category = state.categoryFilter,
+                    fileCount = targets.size
+                ),
+                folder = DownloadsStore.channelFolder(result.sourceTitle),
+                items = queuedItems(targets, result, chatId),
+                keepFiles = state.keepZipFiles
+            )
+        )
+        _uiState.value = state.copy(errorMessage = refusal)
+    }
+
+    /**
+     * Turns "keep the separate files too" on or off for the next ZIP download.
+     *
+     * Persisted, because it is a preference about how the user wants their files
+     * rather than a choice about one batch.
+     */
+    fun setKeepZipFiles(value: Boolean) {
+        AppContainer.appPreferences.setZipKeepsFiles(value)
+        _uiState.value = _uiState.value.copy(keepZipFiles = value)
+    }
+
+    /**
+     * The selection as queue items, shared by both download paths so they can
+     * never disagree about what a queued file is.
+     */
+    private fun queuedItems(
+        targets: List<TelegramRepository.ScannedFile>,
+        result: TelegramRepository.ScanResult,
+        chatId: Long
+    ): List<QueuedDownload> = targets.map { file ->
+        QueuedDownload(
+            messageId = file.messageId,
+            fileId = file.fileId,
+            chatId = chatId,
+            fileName = file.name,
+            category = file.category,
+            sourceTitle = result.sourceTitle,
+            sizeBytes = file.sizeBytes
+        )
     }
 
     /**

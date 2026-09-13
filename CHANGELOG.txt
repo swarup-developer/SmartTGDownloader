@@ -31,16 +31,52 @@ channels look empty. Windows is unchanged at 8.8.0.
 - Android: OTP resend on Telegram's own escalating cooldown (30s / 50s / 60s).
 - Android: unit tests (JUnit 4, JVM) for the preference precedence, range
   seeding and scan-limit escalation rules, and for the history paging policy.
+- Android: a folder per channel in Download/SmartTG Downloader/<channel>/, plus
+  an Open Downloads folder action when a batch finishes - on Home, in the
+  results panel, in History, and on the completion notification. A channel's
+  name is sanitised before it becomes a folder, so a name the filesystem would
+  reject, a name of nothing but dots, or an over-long name still works. A
+  History entry's channel name opens that channel's folder and shows how many
+  files from that channel have been downloaded, so a batch can be checked
+  against what actually arrived. History now opens with one card per channel -
+  file count, total size, and an Open folder button - ordered by the channel last
+  downloaded from, with the size shown as a floor when Telegram withheld it.
+- Android: files left behind by an earlier build in the old
+  Download/SmartTG/<channel>/<type>/ tree are moved into the per-channel layout
+  on first launch, and history entries are repointed at their new location so
+  Open still works. Nothing is lost or duplicated: each file is copied, verified
+  and only then removed, and a pass that could not finish is retried next launch.
+- Android: Download ZIP beside Start download. The same selection is fetched and
+  handed over as a single archive in the channel's own folder instead of as
+  separate files. Files are fetched first and the archive written in one pass, so
+  a file that cannot be fetched is skipped and reported rather than leaving a
+  half-built archive; entry names are made safe to extract and duplicates are
+  numbered. The request is persisted, so an interrupted archive is rebuilt on the
+  next launch from TDLib's cache. An "Also keep the separate files" switch beside
+  the button keeps the individual files as well (off by default, remembered, and
+  recorded on the request so a queued archive still does what it was asked to do);
+  a failed archive then says the files it already saved are still on the device.
+  A finished archive is recorded in History as its own kind of entry - a ZIP icon,
+  the word ZIP in place of a type, an Open action and no Re-download, since an
+  archive was built on the device and has no Telegram message to fetch again. Its
+  history entry is written only once the archive is on disk and is filed under the
+  type it packed, or under All when it mixed types, so the type filter still finds
+  it. Archives are not counted by the per-channel cards: they hold the same files
+  those cards count.
 
 [CHANGED]
 - Android: the permission screen is gone. Downloads are published through
-  MediaStore into Download/SmartTG/<channel>/<category>/ without any storage
+  MediaStore into Download/SmartTG Downloader/<channel>/ without any storage
   permission on Android 10+; Android 8-9 request the legacy grant once and
-  fall back to app storage when it is declined.
-- Android: analysis scans only the file type you choose. The link is pasted
-  first, the file-type step appears beneath it, and the scan then looks for
-  that type alone - so a large channel is no longer trawled for media nobody
-  asked for.
+  fall back to app storage when it is declined. The folder is now named after
+  the app and holds one folder per channel, with no type level: earlier 2.2.0
+  dev builds used Download/SmartTG/<channel>/<category>/, and files already
+  there are left where they are.
+- Android: analysis scans only the file type you choose, and which type that is
+  is asked in a dialog when Analyze is pressed: All / Audio / Video / Images /
+  Docs, the same set Settings offers, with All meaning every file in the link.
+  The scan then looks for that type alone, so a large channel is no longer
+  trawled for media nobody asked for.
 - Android: the results panel states what it found and asks what to take
   ("N files found - download all, or select a range?"), then shows the selected
   count and total download size before Start download.

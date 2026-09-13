@@ -18,6 +18,8 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -25,13 +27,13 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.SearchOff
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -39,6 +41,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.minimumInteractiveComponentSize
@@ -71,6 +74,8 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.swarupbaral.smarttgdownloader.data.AppPreferences
+import com.swarupbaral.smarttgdownloader.data.DownloadManager
+import com.swarupbaral.smarttgdownloader.data.DownloadsStore
 import com.swarupbaral.smarttgdownloader.data.SavedRange
 import com.swarupbaral.smarttgdownloader.data.TelegramRepository
 
@@ -89,28 +94,59 @@ fun HomeScreen(
     // The progress notification needs POST_NOTIFICATIONS on Android 13+. The
     // download itself runs either way — declining only hides the notification,
     // so this is a one-tap ask at the moment it becomes relevant, not a gate.
+    // Both start buttons need it, so the ask is shared: whichever was tapped is
+    // what runs once the answer arrives.
+    var pendingStart by remember { mutableStateOf<(() -> Unit)?>(null) }
     val notificationPermission = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
-    ) { viewModel.startDownload(context) }
+    ) {
+        pendingStart?.invoke()
+        pendingStart = null
+    }
 
-    val startDownload = {
+    val requireNotificationPermission: (() -> Unit) -> Unit = { action ->
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             ContextCompat.checkSelfPermission(
                 context,
                 Manifest.permission.POST_NOTIFICATIONS
             ) != PackageManager.PERMISSION_GRANTED
         ) {
+            pendingStart = action
             notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         } else {
-            viewModel.startDownload(context)
+            action()
         }
     }
+
+    val startDownload = { requireNotificationPermission { viewModel.startDownload(context) } }
+    val startZip = { requireNotificationPermission { viewModel.startZip(context) } }
 
     // Keep last-known per-file progress while the results sheet is open.
     val fileProgress = state.fileProgress
     // The link is what reveals the file-type step. Derived from the field
     // itself, so it survives a config change and needs no extra state.
     val linkEntered = state.link.isNotBlank()
+
+    // The results sheet carries the same completion actions as this screen, so
+    // Home's card stays hidden while the sheet is open: two live regions saying
+    // the same thing would have a screen reader announce the batch twice.
+    val resultsSheetOpen = state.scanResult != null && state.visibleFiles.isNotEmpty()
+
+    // Whether the "what do you want to download?" dialog is up.
+    var showFilterDialog by remember { mutableStateOf(false) }
+
+    // Where the files are, for the case where the device has no file manager to
+    // show them. Local to this screen on purpose: it belongs to one tap, not to
+    // the run.
+    var folderMessage by remember { mutableStateOf<String?>(null) }
+    val openFolder: (String?) -> Unit = { folder ->
+        folderMessage = when (DownloadsStore.openFolder(context, folder)) {
+            DownloadsStore.FolderOpenOutcome.OPENED -> null
+            DownloadsStore.FolderOpenOutcome.NO_APP ->
+                "No file manager app found on this device. The files are in " +
+                    "${DownloadsStore.displayPath(folder ?: DownloadsStore.ROOT)}."
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -148,41 +184,39 @@ fun HomeScreen(
                 .semantics { contentDescription = "Telegram link input field" }
         )
 
-        // The file-type step appears once there is a link to analyze. The type
-        // still has to be chosen before the scan starts — the scan collects one
-        // type — but it is asked for once the user has committed to a link,
-        // rather than as a question floating above an empty field.
+        // Step 2 is the analyze action itself. The file type is asked for in a
+        // dialog when it is pressed, not in chips above the button: the scan
+        // collects one type, so the choice has to be made before it starts, and
+        // the press is the moment the user is thinking about it.
         if (linkEntered) {
             Spacer(Modifier.height(24.dp))
-            StepHeading(2, "Choose the file type to download")
+            StepHeading(2, "Analyze the link")
             Spacer(Modifier.height(2.dp))
             // A live region, so the step that just appeared below the field is
             // announced instead of silently arriving somewhere off-screen.
             Text(
-                "Pick the type to download, then analyze. The scan looks for this type only.",
+                "Analyze asks what you want to download — Audio, Video, Images, " +
+                    "Docs or All. It looks for that one type, and All takes every " +
+                    "file in the link.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
                 modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }
             )
             Spacer(Modifier.height(8.dp))
-            FilterSection(
-                selected = state.categoryFilter,
-                onSelect = viewModel::setFilter
-            )
-            Spacer(Modifier.height(16.dp))
             Button(
-                onClick = viewModel::analyze,
+                onClick = { showFilterDialog = true },
                 enabled = !state.analyzing,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Text(analyzeLabel(state.analyzing, state.categoryFilter))
+                Text(if (state.analyzing) "Analyzing…" else "Analyze link")
             }
         }
 
         Spacer(Modifier.height(20.dp))
         Text(
-            "Files are saved to Download/${com.swarupbaral.smarttgdownloader.data.DownloadsStore.ROOT}. " +
-                "No storage permission is needed, and downloads keep running if you leave the app.",
+            "Files are saved to Download/${DownloadsStore.ROOT}/<channel>/ — one folder per " +
+                "channel. No storage permission is needed, and downloads keep running if you " +
+                "leave the app.",
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
         )
@@ -213,6 +247,21 @@ fun HomeScreen(
             Text(
                 it,
                 modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }
+            )
+        }
+
+        // The batch is over: where the files went, and a way to go and look. It
+        // is NOT opened automatically — being thrown out of the app the moment a
+        // download completes is disorienting, and a screen reader user would
+        // have their focus moved somewhere they never asked to go.
+        if (state.runState.isTerminal && !resultsSheetOpen) {
+            Spacer(Modifier.height(20.dp))
+            DownloadFinishedCard(
+                message = state.runState.message ?: "Download finished.",
+                folder = state.runState.lastSavedFolder,
+                folderMessage = folderMessage,
+                onOpenFolder = openFolder,
+                onDismiss = viewModel::acknowledgeRun
             )
         }
 
@@ -253,7 +302,7 @@ fun HomeScreen(
 
     val result = state.scanResult
     val visibleFiles = state.visibleFiles
-    if (result != null && visibleFiles.isNotEmpty()) {
+    if (resultsSheetOpen && result != null) {
         ModalBottomSheet(onDismissRequest = viewModel::dismissResults) {
             ScanResultsContent(
                 sourceTitle = result.sourceTitle,
@@ -272,6 +321,10 @@ fun HomeScreen(
                 downloading = state.downloading,
                 fileProgress = fileProgress,
                 failures = state.failures,
+                runState = state.runState,
+                folderMessage = folderMessage,
+                onOpenFolder = openFolder,
+                onAcknowledgeRun = viewModel::acknowledgeRun,
                 onToggle = viewModel::toggleSelection,
                 onChooseAll = viewModel::chooseAll,
                 onChooseRange = viewModel::chooseRange,
@@ -280,9 +333,25 @@ fun HomeScreen(
                 onSearchDeeper = viewModel::searchDeeper,
                 onRescan = viewModel::analyze,
                 onRetry = { messageId -> viewModel.retryFailedDownloads(context, messageId) },
-                onDownload = startDownload
+                keepZipFiles = state.keepZipFiles,
+                onKeepZipFilesChange = viewModel::setKeepZipFiles,
+                onDownload = startDownload,
+                onDownloadZip = startZip
             )
         }
+    }
+
+    // Asked for on the press of Analyze, and only then: the type is a decision
+    // about this scan, not a setting to be stared at while typing a link.
+    if (showFilterDialog) {
+        FilterChoiceDialog(
+            selected = state.categoryFilter,
+            onChoose = { category ->
+                showFilterDialog = false
+                viewModel.analyzeWithFilter(category)
+            },
+            onDismiss = { showFilterDialog = false }
+        )
     }
 }
 
@@ -296,44 +365,84 @@ private fun StepHeading(step: Int, text: String) {
     )
 }
 
-private fun analyzeLabel(analyzing: Boolean, filter: String): String = when {
-    analyzing -> "Analyzing…"
-    filter == AppPreferences.CATEGORY_ALL -> "Analyze link"
-    else -> "Analyze link for $filter files"
-}
-
 /**
- * The app's only filter control.
+ * Asks which type of file to look for, at the moment Analyze is pressed.
  *
- * Options come from [AppPreferences.DOWNLOAD_CATEGORIES] — the same list
- * Settings renders — and the selection is persisted there, so the two screens
- * can never drift apart or offer a value the other does not know about.
+ * The options are [AppPreferences.DOWNLOAD_CATEGORIES] — the same list Settings
+ * offers — so no screen can invent a type the others do not know about.
  *
- * The chips only: the step's heading and explanation are rendered by the caller,
- * so the section is not announced twice.
+ * Confirm-then-scan rather than tap-to-choose: scanning a large channel is a real
+ * wait, and one stray tap should not start one.
  */
 @Composable
-private fun FilterSection(selected: String, onSelect: (String) -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .horizontalScroll(rememberScrollState()),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        for (category in AppPreferences.DOWNLOAD_CATEGORIES) {
-            val isSelected = selected == category
-            FilterChip(
-                selected = isSelected,
-                onClick = { onSelect(category) },
-                label = { Text(category) },
-                modifier = Modifier.semantics {
-                    // One choice out of a set, announced as such.
-                    role = Role.RadioButton
-                    stateDescription = if (isSelected) "Selected" else "Not selected"
+private fun FilterChoiceDialog(
+    selected: String,
+    onChoose: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    // Local, so a change of mind inside the dialog scans nothing until Analyze is
+    // pressed. Keyed on the current choice, so reopening shows what is set now.
+    var choice by rememberSaveable(selected) { mutableStateOf(selected) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("What do you want to download?") },
+        text = {
+            Column(modifier = Modifier.selectableGroup()) {
+                Text(
+                    "The scan looks for the type you pick. " +
+                        "\"${AppPreferences.CATEGORY_ALL}\" takes every file in the " +
+                        "link, whatever its type.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f)
+                )
+                Spacer(Modifier.height(4.dp))
+                for (category in AppPreferences.DOWNLOAD_CATEGORIES) {
+                    val isSelected = choice == category
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .selectable(
+                                selected = isSelected,
+                                role = Role.RadioButton,
+                                onClick = { choice = category }
+                            )
+                            // A full row per option, so the whole line is the
+                            // target rather than the 20dp radio circle.
+                            .padding(vertical = 10.dp)
+                    ) {
+                        RadioButton(
+                            selected = isSelected,
+                            onClick = null,
+                            modifier = Modifier.clearAndSetSemantics { }
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(category, style = MaterialTheme.typography.bodyLarge)
+                    }
                 }
-            )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = { onChoose(choice) },
+                modifier = Modifier.semantics {
+                    // Names the action it is about to take, including the type,
+                    // so the press is never a guess.
+                    contentDescription = if (choice == AppPreferences.CATEGORY_ALL) {
+                        "Analyze the link for every file"
+                    } else {
+                        "Analyze the link for $choice files"
+                    }
+                }
+            ) {
+                Text("Analyze")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
         }
-    }
+    )
 }
 
 @Composable
@@ -440,6 +549,10 @@ private fun ScanResultsContent(
     downloading: Boolean,
     fileProgress: Map<Long, DownloadViewModel.FileProgress>,
     failures: Map<Long, String>,
+    runState: DownloadManager.RunState,
+    folderMessage: String?,
+    onOpenFolder: (String?) -> Unit,
+    onAcknowledgeRun: () -> Unit,
     onToggle: (Long) -> Unit,
     onChooseAll: () -> Unit,
     onChooseRange: () -> Unit,
@@ -448,7 +561,10 @@ private fun ScanResultsContent(
     onSearchDeeper: () -> Unit,
     onRescan: () -> Unit,
     onRetry: (Long) -> Unit,
-    onDownload: () -> Unit
+    keepZipFiles: Boolean,
+    onKeepZipFilesChange: (Boolean) -> Unit,
+    onDownload: () -> Unit,
+    onDownloadZip: () -> Unit
 ) {
     val activeEntries = fileProgress.entries.filter { it.key in selected }
     val downloadedTotalBytes = activeEntries.sumOf { entry ->
@@ -649,20 +765,105 @@ private fun ScanResultsContent(
                 modifier = Modifier.semantics { heading() }
             )
             Spacer(Modifier.height(8.dp))
-            Button(
-                onClick = onDownload,
-                enabled = !downloading,
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Button(
+                    onClick = onDownload,
+                    enabled = !downloading,
+                    modifier = Modifier
+                        .weight(1f)
+                        .semantics {
+                            // The label says what the action is; this says how
+                            // much, which is the number that decides the tap.
+                            stateDescription = "${selected.size} file(s), " +
+                                totalSizePhrase(selectedBytes, unknownSizeCount)
+                        }
+                ) {
+                    Text(
+                        when {
+                            runState.packing -> "Creating ZIP…"
+                            downloading -> "Downloading…"
+                            else -> "Start download"
+                        }
+                    )
+                }
+                // Beside Start download, because it is the same selection taken
+                // a different way — not a separate thing to configure.
+                OutlinedButton(
+                    onClick = onDownloadZip,
+                    enabled = !downloading,
+                    modifier = Modifier.semantics {
+                        contentDescription = "Download ZIP. Saves the selected " +
+                            "${selected.size} file(s), " +
+                            "${totalSizePhrase(selectedBytes, unknownSizeCount)}, " +
+                            "as one zip archive."
+                    }
+                ) {
+                    Text("Download ZIP")
+                }
+            }
+            Spacer(Modifier.height(6.dp))
+            // The sentence follows the checkbox, so what the next tap will do is
+            // never ambiguous — including whether the files are kept as well.
+            Text(
+                if (keepZipFiles) {
+                    "Download ZIP saves the same ${selected.size} file(s) as one .zip " +
+                        "archive in the channel's folder, and keeps the separate files too."
+                } else {
+                    "Download ZIP saves the same ${selected.size} file(s) as one .zip " +
+                        "archive in the channel's folder, instead of as separate files."
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+            )
+            Spacer(Modifier.height(4.dp))
+            // Beside the action it modifies, rather than in Settings: it is a
+            // choice about this button, and a screen reader announces the state
+            // as part of the option itself.
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(bottom = 24.dp)
+                    .toggleable(
+                        value = keepZipFiles,
+                        role = Role.Checkbox,
+                        onValueChange = onKeepZipFilesChange
+                    )
                     .semantics {
-                        // The label says what the action is; this says how
-                        // much, which is the number that decides the tap.
-                        stateDescription = "${selected.size} file(s), " +
-                            totalSizePhrase(selectedBytes, unknownSizeCount)
+                        contentDescription = "Also keep the separate files"
+                        stateDescription = if (keepZipFiles) "Kept" else "Not kept"
                     }
+                    .padding(vertical = 4.dp)
             ) {
-                Text(if (downloading) "Downloading…" else "Start download")
+                Checkbox(
+                    checked = keepZipFiles,
+                    onCheckedChange = null,
+                    modifier = Modifier.clearAndSetSemantics { }
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    "Also keep the separate files",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            }
+            Spacer(Modifier.height(16.dp))
+
+            // The sheet stays open over Home while the batch runs, so this is
+            // where the files are reported when it ends — the user is already
+            // looking at it, and would otherwise have to dismiss the sheet to
+            // find out where everything went.
+            if (runState.isTerminal) {
+                Spacer(Modifier.height(12.dp))
+                DownloadFinishedCard(
+                    message = runState.message ?: "Download finished.",
+                    folder = runState.lastSavedFolder,
+                    folderMessage = folderMessage,
+                    onOpenFolder = onOpenFolder,
+                    onDismiss = onAcknowledgeRun
+                )
             }
         } else {
             Spacer(Modifier.height(24.dp))
@@ -881,6 +1082,106 @@ private fun totalSizePhrase(bytes: Long, unknownCount: Int): String =
     } else {
         formatBytes(bytes)
     }
+
+/**
+ * "The batch is done, and here is where it went."
+ *
+ * The folder buttons are the point: they answer "where are my files?" without
+ * the user having to know that MediaStore writes into Downloads at all.
+ */
+@Composable
+private fun DownloadFinishedCard(
+    message: String,
+    folder: String?,
+    folderMessage: String?,
+    onOpenFolder: (String?) -> Unit,
+    onDismiss: () -> Unit
+) {
+    Card(
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
+        )
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp)
+                .semantics {
+                    paneTitle = "Download finished"
+                    // One live region for the whole card, so the summary and the
+                    // actions arrive together as one announcement.
+                    liveRegion = LiveRegionMode.Polite
+                }
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Filled.CheckCircle,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary
+                )
+                Spacer(Modifier.width(12.dp))
+                Text(
+                    message,
+                    style = MaterialTheme.typography.titleSmall,
+                    modifier = Modifier.semantics { heading() }
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+            OpenFolderActions(folder = folder, onOpenFolder = onOpenFolder)
+            folderMessage?.let {
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    it,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f)
+                )
+            }
+            TextButton(onClick = onDismiss) { Text("Dismiss") }
+        }
+    }
+}
+
+/**
+ * "Show me the files", as two buttons at most.
+ *
+ * The channel folder is only offered when the batch actually saved something
+ * into it ([folder] is null otherwise) — MediaStore creates the directory with
+ * the first file, so a button offered earlier would open a folder that does not
+ * exist.
+ */
+@Composable
+private fun OpenFolderActions(folder: String?, onOpenFolder: (String?) -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Button(
+            onClick = { onOpenFolder(null) },
+            modifier = Modifier.semantics {
+                // The full location is spoken, because "the Downloads folder"
+                // on its own does not say which folder the files are in.
+                contentDescription =
+                    "Open Downloads folder, ${DownloadsStore.displayPath()}"
+            }
+        ) {
+            Text("Open Downloads folder")
+        }
+        if (folder != null) {
+            val channel = DownloadsStore.channelName(folder)
+            OutlinedButton(
+                onClick = { onOpenFolder(folder) },
+                modifier = Modifier.semantics {
+                    contentDescription =
+                        "Open $channel folder, ${DownloadsStore.displayPath(folder)}"
+                }
+            ) {
+                Text("Open $channel folder")
+            }
+        }
+    }
+}
 
 private fun formatBytes(bytes: Long): String {
     if (bytes <= 0) return "0 B"

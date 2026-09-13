@@ -307,8 +307,9 @@ fun SettingsScreen(
             Spacer(Modifier.height(4.dp))
             Text(
                 "Files are saved straight into your Downloads folder as " +
-                    "Download/${DownloadsStore.ROOT}/<channel>/<category>/, so they show up " +
-                    "in the Files app and in any gallery or player. Saving there needs no " +
+                    "Download/${DownloadsStore.ROOT}/<channel>/, so they show up " +
+                    "in the Files app and in any gallery or player. A folder is created " +
+                    "for each channel you download from. Saving there needs no " +
                     "storage permission.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)

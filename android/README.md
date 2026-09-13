@@ -211,7 +211,7 @@ adb shell am start -n com.swarupbaral.smarttgdownloader/.MainActivity
 ## Where downloads are saved
 
 Files land in the user's public Download folder as
-`Download/SmartTG/<channel>/<category>/<file>`, and **no storage permission is
+`Download/SmartTG Downloader/<channel>/<file>`, and **no storage permission is
 requested**. On Android 10+ this goes through `MediaStore.Downloads`, which
 lets an app create its own files under `Download/` without any grant; the old
 MANAGE_EXTERNAL_STORAGE / all-files-access flow (and its blocking permission
@@ -221,6 +221,108 @@ Android 8 and 9 predate scoped storage and have no permission-free way to
 write there, so on those two releases the classic runtime grant is requested
 once, lazily, when a download starts — and if the user declines, the file
 falls back to the app's own external directory rather than being lost.
+
+Two things about that path are deliberate:
+
+- **The root folder is the app's full name**, not an abbreviation, because it is
+  what the user has to recognise while hunting for their files in the Files app.
+- **One folder per channel**, created by MediaStore when the first file lands in
+  it. The file *type* is not a folder: the channel is what a person looks for,
+  and the extension already says what the file is. A channel title a filesystem
+  would reject is sanitised — separators and reserved characters replaced, a
+  name of nothing but dots becomes `Telegram` so it cannot resolve *outside* the
+  app's own folder, and an over-long name is shortened to fit one path
+  component, byte-counted and cut on character boundaries. (Builds before this
+  wrote to `Download/SmartTG/<channel>/<category>/`; files already there are
+  left exactly where they are.)
+
+### Moving files out of the old tree
+
+An earlier 2.2.0 development build wrote to `Download/SmartTG/<channel>/<type>/`.
+On the first launch after this change those files are moved into the per-channel
+layout automatically. There is no prompt, because a prompt nobody answers leaves
+files in a folder the app no longer writes to — a worse default than tidying them
+up.
+
+Two properties matter more here than speed:
+
+- **A file is never lost, and never duplicated.** Each file is copied into its
+  channel folder, the copy is written fully (marked pending until it is), and only
+  then is the original removed. If the copy cannot be written, the original is
+  untouched; if the original cannot be removed, the copy is rolled back. The only
+  possible outcome is "still where it was", and that is reported.
+- **It finishes, or it retries.** The done-flag is set only by a pass that
+  completed, so a partial move — a failure, or Android 8–9 without the legacy
+  storage grant — is picked up on the next launch instead of being forgotten.
+
+The move is copy-then-delete rather than a metadata-only `RELATIVE_PATH` update,
+because that behaves identically on every supported release and each step can be
+checked. History rows are repointed at the file's new location in the same pass,
+so Open keeps working on a file that has moved.
+
+The old tree is removed once it is empty, so the user is not left staring at the
+folder they were just told the app no longer uses.
+
+### Opening the Download folder
+
+Because the files go straight into Downloads, the app can take the user there
+instead of describing the path. **Open Downloads folder** appears on the
+completion card on Home, in the results panel that started the batch, in
+History, and as an action on the completion notification — the channel's own
+folder when the batch saved something into it, otherwise the Download root.
+
+It is deliberately never opened automatically: being thrown out of the app the
+moment a download completes is disorienting, and for a screen reader user it
+would move the focus somewhere they never asked to go.
+
+There is no API for showing a shared folder, so the app composes the document
+URI the platform's storage provider itself uses — the folder as a *directory*
+first, then the Download root as a browsable *group* — and lets whichever file
+manager is installed open it. Each candidate is tried by actually starting it,
+rather than gated on `resolveActivity`, which since Android 11 returns null for
+packages the app cannot see and would report "no file manager" on a device that
+has one. If nothing accepts a folder, the button says so and names the path
+instead of doing nothing.
+
+The notification's action routes through `MainActivity` rather than starting a
+file manager directly: a notification action may not start another app's
+activity from the background on Android 10+, while this app's own activity is
+the case the platform does allow. The folder is then opened from `onPostResume`,
+from the foreground.
+
+### Channels at the top of History
+
+Above the list, one card per channel with at least one downloaded file: its name,
+how many files it holds, the space they take, and **Open folder**. The cards scroll
+with the list rather than sitting in a fixed block, so a long history still gets
+the screen to itself.
+
+They are ordered by when the channel was last downloaded from, not by size or by
+count, because "what did I just work on?" is the question this screen gets opened
+with. The size reads as a floor when Telegram withheld sizes for some files —
+*"12 files · 2.4 GB or more"* — rather than presenting a guess as a total. A
+channel whose downloads all failed gets no card: there is nothing in its folder to
+open.
+
+The same count also appears on each entry that links to that channel's folder, and
+both come from one computation, so a row and the card above it can never disagree
+about how many files a channel holds. Two rules keep those numbers honest:
+
+- **Counted from the whole history**, not the filtered list, so filtering by type
+  cannot make a channel look emptier than it is.
+- **Keyed on the folder, not the title**, so two titles that sanitise to the same
+  folder are one card rather than two each claiming half the files. Failed attempts
+  are excluded — they left no file behind, so counting them would report a batch as
+  complete when nothing arrived. A renamed channel is deliberately *two* cards,
+  which is the truthful answer: a rename really is a second folder on disk, and
+  merging them would point one card's button at a folder holding only part of what
+  the card counts.
+
+ZIP archives are deliberately left out of these cards. An archive holds the very
+files a card counts, so adding its size to the total would count the same bytes
+twice, and adding its file count would count the files twice as well. A channel
+known only through an archive therefore has no card — its archive is still listed
+below, with its own Open action and the folder it lives in.
 
 ### Choosing the connection
 
@@ -235,6 +337,83 @@ actually matters is whether the transfer costs the user data.
 
 It is a pre-flight check, not a mid-transfer watchdog: a download already
 running when Wi-Fi drops finishes on whatever connection is live.
+
+## Downloading a selection as one ZIP
+
+**Download ZIP** sits beside **Start download** in the results panel. It fetches
+*the same selection* and hands it over as a single `.zip` archive in the channel's
+folder — `Download/SmartTG Downloader/MC/MC - Audio (20 files).zip` — instead of
+as separate files. There is nothing to set up first: it is the same choice of
+files, taken a different way, which is why it — and the one switch it has — sit
+next to the button rather than in Settings.
+
+By default the archive is the deliverable, so the individual files are **not**
+also saved: saving both doubles the space a selection costs and leaves the user
+with two copies of everything to tidy up. **Also keep the separate files**, the
+switch beside the button, keeps both. It is off by default, remembered between
+batches, and recorded on the request itself — so an archive queued before the
+switch was flipped still does what it was asked to do. Keeping the files is what
+makes a failed archive harmless: the sentence then says the files are still there
+rather than reading like a lost download.
+
+**A finished archive is its own entry in History**, with a ZIP icon and the word
+*ZIP* where a file row states its type. It carries **Open** and **Delete** and no
+Re-download: the archive was built on this device out of files that were fetched
+once, so there is no message to fetch again — and a Re-download that quietly
+fetched the packed files as separate ones would be doing something other than
+what the button says. The engine refuses one for an archive as well as the screen
+hiding it, since a promise the rest of the app does not keep is worse than no
+button at all.
+
+The entry is written only once the archive is really on disk, so an Open action
+always opens something. Its size is the archive's own size rather than the sum of
+what is inside it — that is what the entry costs the user's storage. It is filed
+under the type it packed, so a zip of audio is still found by filtering for
+audio; an archive of a mixed "All" selection belongs to no single type and is
+filed under All rather than being mislabelled as whichever type happened to come
+first.
+
+**Why it is written in two phases.** Every file is fetched into TDLib's cache
+first, and the archive is written in a single pass afterwards. Writing entries as
+they arrive would be faster, but a zip cannot be appended to from the middle — so
+a single failed file would leave a half-built archive that can never be finished,
+making one bad file cost the whole selection. Instead, a file that cannot be
+fetched is skipped and reported: *"Saved MC - Audio (20 files).zip (18 file(s))…
+2 of 20 file(s) could not be downloaded, so they are not in the archive."*
+
+Whether a skipped file joins the Retry list depends on the mode, because Retry
+means something different in each. In the default archive-only mode it does
+**not**: a file inside an archive cannot be retried on its own, and a Retry button
+that quietly downloaded it as a separate file would be doing something other than
+what the user asked for. With **Also keep the separate files** on, it does — the
+file was meant to be on disk anyway, so retrying it there is exactly the promise.
+
+**Interruptions.** An archive is built from scratch, so a run killed part-way
+throws its partial archive away and rebuilds on the next launch. That is cheap
+rather than wasteful: the files are already in TDLib's cache, so the second pass
+reads them from disk instead of fetching them again. The request itself is
+persisted like the download queue, so it survives a process death instead of
+disappearing with the screen that made it.
+
+Two things worth knowing about the archive's contents:
+
+- **Entry names are safe to extract.** A path separator in an entry name is a
+  zip-slip hazard for any extractor that joins names onto a destination folder,
+  and Telegram file names can contain one, so separators become underscores.
+- **Duplicate names are numbered** (`track.mp3`, `track (2).mp3`), compared
+  case-insensitively because the filesystem the archive is extracted onto may not
+  distinguish `Track.mp3` from `track.mp3`.
+
+The bytes are streamed straight into their final home — a MediaStore row that
+stays invisible until the archive is complete, or a `.partial` file renamed on
+Android 8–9 — never assembled in a temporary file and copied in, which would need
+space for the archive twice over.
+
+**Not listed in History, on purpose.** History's rows are one per Telegram
+message, and an archive has no message behind it; inventing a row would also put
+a Re-download action on something that cannot be re-downloaded. The completion
+card on Home and the notification report the archive instead, each with the
+button that opens its folder.
 
 ## Background downloads
 
@@ -330,12 +509,21 @@ relevant controls are on screen at a time.
 
 ## The Home flow, in order
 
-1. **Paste the link.** The file-type step appears below the field once there is
-   a link to analyze, and is a live region, so it is announced when it arrives
-   instead of silently appearing off-screen.
-2. **Choose the file type** — `All`, `Audio`, `Video`, `Images` or `Docs` — then
-   analyze. The scan looks for the chosen type only, so a big channel is not
-   trawled for media the user has already said they do not want.
+1. **Paste the link.** The analyze step appears below the field once there is a
+   link, and is a live region, so it is announced when it arrives instead of
+   silently appearing off-screen.
+2. **Press Analyze, and answer the dialog** — *"What do you want to download?"* —
+   with `All`, `Audio`, `Video`, `Images` or `Docs`. The scan then looks for that
+   one type, so a big channel is not trawled for media the user has already ruled
+   out; `All` means every file in the link, whatever its type.
+
+The dialog appears *on the press* rather than as chips waiting above the button,
+because the choice belongs to the scan about to run: the type is settled at the
+moment the user asks for one. It confirms rather than acting on the first tap,
+and the dialog's own list is the same `All / Audio / Video / Images / Docs` set
+Settings offers — no screen invents a type the others do not know about. Pressing
+Analyze again is how the type is changed; the choice is remembered, so reopening
+the dialog shows what is set now.
 3. **The count is announced**: *"200 Audio files found. Do you want to download
    all 200 files, or would you like to select a range?"*
 4. **Download all, or select a range** (numbers or the Newest 10/20/50/100
@@ -344,8 +532,8 @@ relevant controls are on screen at a time.
    file(s). The total download size is 2.5 GB."*
 6. **Start download.**
 
-Because a scan now answers for exactly one type, changing the file type drops
-results that were collected for a different one and says to analyze again — old
+Because a scan answers for exactly one type, choosing a different one drops
+results that were collected for the previous type and says to analyze again — old
 rows for "Audio" say nothing about "Video", and leaving them on screen would
 invite downloading files that were never looked for.
 

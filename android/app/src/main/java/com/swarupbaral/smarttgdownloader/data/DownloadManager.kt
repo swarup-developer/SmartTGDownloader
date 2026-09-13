@@ -58,7 +58,23 @@ object DownloadManager {
         /** Name of the file currently being fetched, for the notification. */
         val currentName: String? = null,
         /** Final summary, set when the run reaches a terminal phase. */
-        val message: String? = null
+        val message: String? = null,
+        /**
+         * The channel folder this run last wrote a file into, or null when it
+         * has not saved anything yet.
+         *
+         * Set only on a real save on purpose: offering to open a channel's
+         * folder before a file has gone into it would take the user to a folder
+         * that does not exist.
+         */
+        val lastSavedFolder: String? = null,
+        /**
+         * True while a run is writing an archive rather than fetching files.
+         *
+         * The wait is local disk work at that point, so the notification and
+         * the progress line say "creating ZIP" instead of "downloading".
+         */
+        val packing: Boolean = false
     ) {
         val isRunning: Boolean get() = phase == Phase.RUNNING
 
@@ -128,7 +144,9 @@ object DownloadManager {
 
     /** True when there is work the user could resume. */
     fun hasPendingWork(context: Context): Boolean =
-        job?.isActive == true || DownloadQueueStore.load(context).isNotEmpty()
+        job?.isActive == true ||
+            DownloadQueueStore.load(context).isNotEmpty() ||
+            DownloadQueueStore.loadZipRequest(context) != null
 
     /**
      * Adds [items] to the queue and asks [DownloadService] to run it.
@@ -162,6 +180,35 @@ object DownloadManager {
     }
 
     /**
+     * Queues [request]'s selection as a single .zip archive.
+     *
+     * Returns the reason it was refused, or null when it was accepted. One
+     * archive at a time: an archive is written in a single pass, so a second
+     * request could not be interleaved with the first, and quietly replacing it
+     * would lose the selection the user asked for.
+     */
+    fun enqueueZip(context: Context, request: ZipRequest): String? {
+        if (request.items.isEmpty()) return null
+        val appContext = context.applicationContext
+        if (job?.isActive == true || DownloadQueueStore.loadZipRequest(appContext) != null) {
+            return "A download is already running. Wait for it to finish, or cancel it."
+        }
+
+        DownloadQueueStore.saveZipRequest(appContext, request)
+        _pendingIds.value = request.items.map { it.messageId }.toSet()
+        _fileProgress.value = request.items.associate {
+            it.messageId to FileProgress(0L, it.sizeBytes)
+        }
+        _state.value = RunState(phase = Phase.RUNNING, total = request.items.size)
+
+        ContextCompat.startForegroundService(
+            appContext,
+            Intent(appContext, DownloadService::class.java)
+        )
+        return null
+    }
+
+    /**
      * Picks up a batch that a process kill interrupted.
      *
      * Called by the UI once Telegram reports an authorized state — resuming
@@ -171,7 +218,11 @@ object DownloadManager {
     fun resumePendingWork(context: Context) {
         if (job?.isActive == true) return
         val appContext = context.applicationContext
-        if (DownloadQueueStore.load(appContext).isEmpty()) return
+        if (DownloadQueueStore.load(appContext).isEmpty() &&
+            DownloadQueueStore.loadZipRequest(appContext) == null
+        ) {
+            return
+        }
         ContextCompat.startForegroundService(
             appContext,
             Intent(appContext, DownloadService::class.java)
@@ -231,14 +282,20 @@ object DownloadManager {
         if (job?.isActive == true) return
         val appContext = context.applicationContext
         val items = DownloadQueueStore.load(appContext)
-        if (items.isEmpty()) {
+        val archive = DownloadQueueStore.loadZipRequest(appContext)
+        if (items.isEmpty() && archive == null) {
             _state.value = RunState()
             _pendingIds.value = emptySet()
             return
         }
         // Publish RUNNING synchronously so the service's observer never sees a
-        // stale IDLE and mistake a real batch for an empty one.
-        _state.value = RunState(phase = Phase.RUNNING, total = items.size)
+        // stale IDLE and mistake a real batch for an empty one. The total covers
+        // both phases, so the progress bar does not restart when the archive
+        // begins.
+        _state.value = RunState(
+            phase = Phase.RUNNING,
+            total = items.size + (archive?.items?.size ?: 0)
+        )
         val epoch = runEpoch.incrementAndGet()
         job = scope.launch { run(appContext, epoch) }
     }
@@ -255,6 +312,9 @@ object DownloadManager {
         // and "write the queue back", and that write must not happen.
         runEpoch.incrementAndGet()
         DownloadQueueStore.clear(context.applicationContext)
+        // Cancel means stop for the archive too: leaving the request behind
+        // would rebuild it on the next launch.
+        DownloadQueueStore.clearZipRequest(context.applicationContext)
         job?.cancel()
     }
 
@@ -324,10 +384,8 @@ object DownloadManager {
                 // lot.
                 var savedLocation: String? = null
                 var lastError: String? = null
-                var attempt = 0
-                while (attempt < MAX_ATTEMPTS) {
-                    attempt++
-                    try {
+                try {
+                    savedLocation = withRetries {
                         val message =
                             AppContainer.repository.getMessage(item.chatId, item.messageId)
                                 ?: throw IllegalStateException(
@@ -345,31 +403,31 @@ object DownloadManager {
                         _fileProgress.value = _fileProgress.value + (
                             item.messageId to FileProgress(bytes, bytes)
                             )
-                        savedLocation = DownloadsStore.save(
+                        DownloadsStore.save(
                             context = context,
                             source = cached,
                             sourceTitle = item.sourceTitle,
                             category = item.category,
                             fileName = item.fileName
                         ).location
-                        break
-                    } catch (e: CancellationException) {
-                        // Deliberately do NOT drop the item: it stays at the
-                        // head of the queue as the resume point. (A user-initiated
-                        // cancel clears the queue separately.)
-                        throw e
-                    } catch (e: Exception) {
-                        lastError = e.message ?: "Download failed."
-                        // A message that no longer exists will not come back, so
-                        // retrying it would only burn battery.
-                        if (isPermanentFailure(lastError) || attempt >= MAX_ATTEMPTS) break
-                        delay(RETRY_DELAYS_MS[attempt - 1])
                     }
+                } catch (e: CancellationException) {
+                    // Deliberately do NOT drop the item: it stays at the head of
+                    // the queue as the resume point. (A user-initiated cancel
+                    // clears the queue separately.)
+                    throw e
+                } catch (e: DownloadFailure) {
+                    lastError = e.message
                 }
 
                 if (savedLocation != null) {
                     recordHistory(item, savedLocation)
                     completed++
+                    // Remember where this batch is landing, so the completion
+                    // surface can offer to open that channel's folder.
+                    _state.value = _state.value.copy(
+                        lastSavedFolder = DownloadsStore.channelFolder(item.sourceTitle)
+                    )
                     // A file that has now succeeded drops off the retry list,
                     // e.g. one re-downloaded by hand from History.
                     if (_failedItems.value.any { it.messageId == item.messageId }) {
@@ -395,13 +453,37 @@ object DownloadManager {
                 _pendingIds.value = remaining.drop(1).map { it.messageId }.toSet()
             }
 
+            // An archive the user asked for, written only after the fetching is
+            // done. Deliberately afterwards: an archive is built from TDLib's
+            // cached copies, and a half-built one is worth nothing, so nothing
+            // about it should start until the work that can fail has finished.
+            val requested = DownloadQueueStore.loadZipRequest(context)
+            val archive = if (requested != null && epoch == runEpoch.get()) {
+                buildArchive(context, requested, epoch)
+            } else {
+                null
+            }
+            if (archive != null) {
+                completed += archive.packed
+                failed += archive.failed
+            }
+            val filesAlsoSaved = completed - (archive?.packed ?: 0)
+
+            // Name the folder in the summary, so "where did it go?" is answered
+            // where the batch finishes rather than only in Settings.
+            val savedFolder = archive?.folder
+                ?: _state.value.lastSavedFolder
+                ?: DownloadsStore.ROOT
             _state.value = _state.value.copy(
                 phase = Phase.FINISHED,
                 completed = completed,
                 failed = failed,
                 currentName = null,
+                packing = false,
                 message = when {
-                    failed == 0 -> "Saved $completed file(s) to your Download folder."
+                    archive != null -> archive.summary(filesAlsoSaved)
+                    failed == 0 ->
+                        "Saved $completed file(s) to ${DownloadsStore.displayPath(savedFolder)}."
                     completed == 0 ->
                         "All $failed file(s) failed after $MAX_ATTEMPTS attempts. " +
                             "Use Retry to try again."
@@ -426,6 +508,203 @@ object DownloadManager {
         } finally {
             progressJob.cancel()
         }
+    }
+
+    /** A fetch that failed every attempt, carrying the reason for the user. */
+    private class DownloadFailure(override val message: String) : Exception(message)
+
+    /**
+     * Runs [block], retrying transient failures with a short backoff.
+     *
+     * One policy for both download shapes. Failures are mostly transient — a
+     * dropped connection, a TDLib hiccup — and TDLib resumes from the bytes it
+     * already holds, so a retry costs almost nothing, while reporting a failure
+     * the user has to clear by hand costs a lot.
+     */
+    private suspend fun <T> withRetries(block: suspend () -> T): T {
+        var attempt = 0
+        var lastError: String? = null
+        while (attempt < MAX_ATTEMPTS) {
+            attempt++
+            try {
+                return block()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                lastError = e.message ?: "Download failed."
+                // A message that no longer exists will not come back, so retrying
+                // it would only burn battery.
+                if (isPermanentFailure(lastError) || attempt >= MAX_ATTEMPTS) break
+                delay(RETRY_DELAYS_MS[attempt - 1])
+            }
+        }
+        throw DownloadFailure(lastError ?: "Download failed.")
+    }
+
+    /**
+     * Writes one archive from TDLib's cached copies of [request]'s selection.
+     *
+     * The two phases matter. Every file is fetched into TDLib's cache first, then
+     * the archive is written in a single pass: writing as we fetch would mean a
+     * failed fetch leaves a half-built archive that can never be completed — a
+     * zip cannot be appended to from the middle — so one bad file would cost the
+     * whole selection instead of just itself.
+     *
+     * A run that is killed part-way throws its partial archive away and starts a
+     * new one on the next launch, which is cheap rather than wasteful: the files
+     * are already in TDLib's cache, so they are read from disk, not fetched
+     * again.
+     */
+    private suspend fun buildArchive(
+        context: Context,
+        request: ZipRequest,
+        epoch: Int
+    ): ArchiveOutcome {
+        var failed = 0
+        var savedFiles = 0
+        val keepFiles = request.keepFiles
+        val sources = mutableListOf<ZipPacker.Entry>()
+
+        for ((index, item) in request.items.withIndex()) {
+            // A cancelled run stops between files, never mid-write.
+            if (epoch != runEpoch.get()) break
+            if (item.fileId > 0) messageIdsByFileId[item.fileId] = item.messageId
+            _fileProgress.value = _fileProgress.value + (
+                item.messageId to FileProgress(0L, item.sizeBytes)
+                )
+            _pendingIds.value = request.items.drop(index).map { it.messageId }.toSet()
+            _state.value = _state.value.copy(
+                phase = Phase.RUNNING,
+                total = maxOf(_state.value.total, request.items.size),
+                completed = index,
+                failed = failed,
+                currentName = item.fileName,
+                packing = false
+            )
+            var savedLocation: String? = null
+            try {
+                val cached = withRetries {
+                    val message =
+                        AppContainer.repository.getMessage(item.chatId, item.messageId)
+                            ?: throw IllegalStateException("Message is no longer available.")
+                    val file = AppContainer.repository.downloadToCache(message)
+                    val bytes = file.length()
+                    _fileProgress.value = _fileProgress.value + (
+                        item.messageId to FileProgress(bytes, bytes)
+                        )
+                    // Last in the block, and only when the files are wanted.
+                    // Publishing as we go is what makes a failed archive cheap:
+                    // the files fetched so far are already safely in Downloads,
+                    // so a bad archive costs the user nothing they have paid for.
+                    if (keepFiles) {
+                        savedLocation = DownloadsStore.save(
+                            context = context,
+                            source = file,
+                            sourceTitle = item.sourceTitle,
+                            category = item.category,
+                            fileName = item.fileName
+                        ).location
+                    }
+                    file
+                }
+                // Bookkeeping outside the retry loop, so a failure here can never
+                // publish a second copy of a file that is already in place.
+                if (savedLocation != null) {
+                    savedFiles++
+                    recordHistory(item, savedLocation)
+                    _state.value = _state.value.copy(
+                        lastSavedFolder = DownloadsStore.channelFolder(item.sourceTitle)
+                    )
+                }
+                sources += ZipPacker.Entry(item.fileName, cached)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: DownloadFailure) {
+                failed++
+                _failures.value = _failures.value + (item.messageId to e.message)
+                // The retry list is only for a run that keeps the files: a Retry
+                // for a file that lives inside an archive would download it as a
+                // separate file, which is not what archive-only mode promises.
+                if (keepFiles && _failedItems.value.none { it.messageId == item.messageId }) {
+                    _failedItems.value = _failedItems.value + item
+                    DownloadQueueStore.saveFailed(context, _failedItems.value)
+                }
+            }
+        }
+
+        if (sources.isEmpty()) {
+            DownloadQueueStore.clearZipRequest(context)
+            return ArchiveOutcome(
+                fileName = request.fileName,
+                folder = request.folder,
+                packed = 0,
+                savedFiles = savedFiles,
+                keptFiles = keepFiles,
+                failed = failed,
+                items = request.items.size,
+                error = null
+            )
+        }
+
+        // Fetching is over; the rest is local disk work, and the wording says so
+        // — "downloading 19 of 20" while packing would be a small lie.
+        _state.value = _state.value.copy(
+            packing = true,
+            completed = 0,
+            currentName = request.fileName
+        )
+        var packed = 0
+        // Stays null when the write failed, which is what tells the caller apart
+        // from a successful archive of zero files.
+        var saved: DownloadsStore.SavedFile? = null
+        var error: String? = null
+        try {
+            saved = DownloadsStore.saveArchive(context, request.folder, request.fileName) { output ->
+                packed = ZipPacker.write(output, sources) { entry ->
+                    // Cancelling during packing stops between files, not after the
+                    // whole archive is written: throwing here abandons the write,
+                    // and saveArchive's failure path removes what was written, so
+                    // a cancelled run never publishes an archive the user
+                    // cancelled.
+                    if (epoch != runEpoch.get()) {
+                        throw CancellationException("Cancelled while creating the ZIP.")
+                    }
+                    _state.value = _state.value.copy(
+                        completed = _state.value.completed + 1,
+                        currentName = entry.name
+                    )
+                }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // Not retried on its own: the cause is usually about this device —
+            // space, a file that is gone — and would fail the same way again.
+            // Clearing the request lets the user ask again once it is fixed.
+            DownloadQueueStore.clearZipRequest(context)
+            error = e.message ?: "The ZIP could not be created."
+        }
+        val written = saved
+        if (error == null && written != null) {
+            DownloadQueueStore.clearZipRequest(context)
+            // Recorded only once the archive is really on disk: a row for a
+            // failed archive would offer an Open action that opens nothing.
+            recordArchiveHistory(request, written)
+            _state.value = _state.value.copy(
+                lastSavedFolder = request.folder,
+                packing = false
+            )
+        }
+        return ArchiveOutcome(
+            fileName = request.fileName,
+            folder = request.folder,
+            packed = if (error == null) packed else 0,
+            savedFiles = savedFiles,
+            keptFiles = keepFiles,
+            failed = failed,
+            items = request.items.size,
+            error = error
+        )
     }
 
     /**
@@ -455,7 +734,47 @@ object DownloadManager {
                 sizeBytes = item.sizeBytes,
                 completedAtEpochMs = System.currentTimeMillis(),
                 localPath = location,
-                succeeded = location != null
+                succeeded = location != null,
+                entryKind = DownloadEntryKind.FILE
+            )
+        )
+    }
+
+    /**
+     * Records a finished archive as its own kind of entry.
+     *
+     * An archive has no Telegram message behind it, so it cannot be re-fetched
+     * and is never offered as such: History shows it with Open and Delete only.
+     * Its id is allocated in the negative range ([archiveHistoryId]) because the
+     * message id is the primary key and the positive range belongs to Telegram.
+     * An archive re-downloaded into the same place updates its existing row, so
+     * the list does not fill with rows all pointing at one file.
+     *
+     * The size is the archive's own size on disk, not the sum of the files inside
+     * it — that is what the entry actually costs the user's storage.
+     */
+    private suspend fun recordArchiveHistory(
+        request: ZipRequest,
+        saved: DownloadsStore.SavedFile
+    ) {
+        val dao = AppContainer.historyDao
+        val existing = dao.archiveByLocalPath(saved.location)
+        val title = request.items.firstOrNull()
+            ?.sourceTitle
+            ?.takeIf { it.isNotBlank() }
+            ?: DownloadsStore.channelName(request.folder)
+        dao.upsert(
+            DownloadHistoryEntity(
+                messageId = archiveHistoryId(existing?.messageId, dao.lowestArchiveId()),
+                chatId = request.items.firstOrNull()?.chatId ?: 0L,
+                fileName = request.fileName,
+                category = archiveCategory(request.items.map { it.category }),
+                sourceTitle = title,
+                sizeBytes = saved.bytes,
+                completedAtEpochMs = System.currentTimeMillis(),
+                localPath = saved.location,
+                succeeded = true,
+                entryKind = DownloadEntryKind.ARCHIVE
             )
         )
     }
