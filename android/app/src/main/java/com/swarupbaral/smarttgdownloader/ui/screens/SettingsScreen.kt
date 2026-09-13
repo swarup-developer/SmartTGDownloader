@@ -62,6 +62,7 @@ fun SettingsScreen(
     val themeMode by viewModel.themeMode.collectAsState()
     val dynamicColor by viewModel.dynamicColor.collectAsState()
     val defaultCategory by viewModel.defaultCategory.collectAsState()
+    val askBeforeAnalyzing by viewModel.askBeforeAnalyzing.collectAsState()
     val downloadNetwork by viewModel.downloadNetwork.collectAsState()
     val scanLimit by viewModel.scanLimit.collectAsState()
     val channels by viewModel.channels.collectAsState()
@@ -185,6 +186,37 @@ fun SettingsScreen(
                         label = { Text(category) }
                     )
                 }
+            }
+            Spacer(Modifier.height(8.dp))
+            // Sits under the filter above because it is about that value: with
+            // the question off, this is the type every scan uses — which is also
+            // why turning it back on is here rather than only in the dialog.
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("Ask which type before analyzing", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        if (askBeforeAnalyzing) {
+                            "Analyze asks which type to look for before it scans."
+                        } else {
+                            "Off: Analyze scans for $defaultCategory without asking. " +
+                                "The box in the question turns this back on."
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                    )
+                }
+                Switch(
+                    checked = askBeforeAnalyzing,
+                    onCheckedChange = viewModel::setAskBeforeAnalyzing,
+                    modifier = Modifier.semantics {
+                        contentDescription = "Ask which type before analyzing"
+                        stateDescription = if (askBeforeAnalyzing) "On" else "Off"
+                    }
+                )
             }
 
             Spacer(Modifier.height(24.dp))

@@ -63,6 +63,24 @@ channels look empty. Windows is unchanged at 8.8.0.
   type it packed, or under All when it mixed types, so the type filter still finds
   it. Archives are not counted by the per-channel cards: they hold the same files
   those cards count.
+- Android: a "Don't ask again" box in the analyze dialog, so a repeat user answers
+  the file-type question once. The type becomes the remembered one and Analyze
+  scans for it straight away, with the step naming the type it is using and a
+  Change type action beside the button. The question comes back by unticking the
+  box or from the new "Ask which type before analyzing" switch in Settings, which
+  sits under Default filter because that value is what a skipped question uses.
+  A remembered type this build does not recognise falls back to All rather than
+  being handed to the scan, where it would match nothing and report an empty
+  channel for what is really a stale setting.
+- Android: the results panel can change the file type and scan again on the spot,
+  with the same All/Audio/Video/Images/Docs set as everywhere else, instead of
+  sending the user back to the link field to rescan. The panel stays open across
+  that rescan, says which type it is scanning for, offers Stop scanning, and keeps
+  the control available when a scan comes back empty - the case where trying
+  another type matters most. The type chosen is remembered as the default filter,
+  without touching the "ask before analyzing" preference, and the chips are held
+  closed while a download is running so the per-file progress cannot be cleared
+  out from under the user.
 
 [CHANGED]
 - Android: the permission screen is gone. Downloads are published through

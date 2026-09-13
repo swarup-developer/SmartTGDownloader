@@ -521,9 +521,25 @@ The dialog appears *on the press* rather than as chips waiting above the button,
 because the choice belongs to the scan about to run: the type is settled at the
 moment the user asks for one. It confirms rather than acting on the first tap,
 and the dialog's own list is the same `All / Audio / Video / Images / Docs` set
-Settings offers — no screen invents a type the others do not know about. Pressing
-Analyze again is how the type is changed; the choice is remembered, so reopening
-the dialog shows what is set now.
+Settings offers — no screen invents a type the others do not know about. The
+choice is remembered, so reopening the dialog shows what is set now.
+
+**Don't ask again** is the dialog's one other control. Ticked, the answer becomes
+the remembered one: pressing Analyze scans for that type straight away, and the
+step says which type it is using — *"Analyze looks for Audio files without asking,
+because you turned the question off"* — with **Change type** beside the button
+reopening the dialog. Unticking the box, or the **Ask which type before
+analyzing** switch in Settings, is how the question comes back; neither is hidden,
+which matters because a preference that can only be set and not unset is a trap.
+The switch lives under *Default filter* because that value is what a skipped
+question uses: one remembered type, shown in exactly one place, rather than a
+private copy that could drift from what Settings says.
+
+A remembered type this build does not recognise (a value written by a newer
+version, or a corrupted preference) falls back to `All` rather than being handed
+to the scan. A stale type would match nothing and report the channel as empty —
+blaming the channel for a bad setting, and the most misleading answer the app can
+give.
 3. **The count is announced**: *"200 Audio files found. Do you want to download
    all 200 files, or would you like to select a range?"*
 4. **Download all, or select a range** (numbers or the Newest 10/20/50/100
@@ -533,9 +549,34 @@ the dialog shows what is set now.
 6. **Start download.**
 
 Because a scan answers for exactly one type, choosing a different one drops
-results that were collected for the previous type and says to analyze again — old
-rows for "Audio" say nothing about "Video", and leaving them on screen would
-invite downloading files that were never looked for.
+results that were collected for the previous type — old rows for "Audio" say
+nothing about "Video", and leaving them on screen would invite downloading files
+that were never looked for.
+
+### Changing the type from the results panel
+
+The results panel carries its own **File type** control, the same
+`All / Audio / Video / Images / Docs` set as everywhere else. Choosing a type
+scans again immediately: the user is looking at a scan's output and asking for it
+to be different, which is one intention, not two. Tapping the type that is already
+selected does nothing rather than starting a redundant scan. Whatever is chosen
+is remembered as the default filter, so the next link starts there — but this does
+**not** touch the *Ask which type before analyzing* preference, because a change
+made here is not an answer to that question.
+
+The panel stays open across that rescan, which is why it is gated on an explicit
+open flag rather than on there being rows to show: a rescan clears the rows it is
+replacing, so deriving the panel's existence from them would close it at the exact
+moment the user asked it to do something. While the rescan runs the panel says
+which type it is scanning for, offers **Stop scanning**, and keeps the type
+control in place — as it does for a scan that comes back with nothing, since
+*"No Video files found"* is a statement about one type and the way to act on it is
+one tap up. Home's own scanning block is suppressed while the panel is open, so
+exactly one surface reports a scan rather than leaving a Stop button covered by
+the sheet.
+
+The type chips are held closed while a download is running, and the panel says so:
+a rescan clears the rows, and those rows are where the per-file progress lives.
 
 An empty result distinguishes the two cases that need different fixes:
 

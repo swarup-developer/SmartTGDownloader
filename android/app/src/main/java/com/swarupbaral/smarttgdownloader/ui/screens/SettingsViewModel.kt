@@ -75,6 +75,18 @@ class SettingsViewModel : ViewModel() {
         AppContainer.appPreferences.setDefaultCategory(value)
     }
 
+    /**
+     * Whether pressing Analyze asks which type to look for.
+     *
+     * The way back from "don't ask again" in the dialog, and the place the
+     * remembered type is visible while the question is off.
+     */
+    val askBeforeAnalyzing: StateFlow<Boolean> = AppContainer.appPreferences.askBeforeAnalyzing
+
+    fun setAskBeforeAnalyzing(value: Boolean) {
+        AppContainer.appPreferences.setAskBeforeAnalyzing(value)
+    }
+
     // --- Scan limit ---------------------------------------------------------
 
     /**

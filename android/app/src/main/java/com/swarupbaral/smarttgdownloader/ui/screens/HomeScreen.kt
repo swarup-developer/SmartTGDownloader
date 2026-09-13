@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -34,6 +35,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -130,7 +132,11 @@ fun HomeScreen(
     // The results sheet carries the same completion actions as this screen, so
     // Home's card stays hidden while the sheet is open: two live regions saying
     // the same thing would have a screen reader announce the batch twice.
-    val resultsSheetOpen = state.scanResult != null && state.visibleFiles.isNotEmpty()
+    //
+    // Read from the panel's own flag rather than from the rows on screen: the
+    // panel can scan again from inside itself, and that rescan deliberately
+    // clears the rows it is replacing.
+    val resultsSheetOpen = state.panelOpen
 
     // Whether the "what do you want to download?" dialog is up.
     var showFilterDialog by remember { mutableStateOf(false) }
@@ -187,28 +193,72 @@ fun HomeScreen(
         // Step 2 is the analyze action itself. The file type is asked for in a
         // dialog when it is pressed, not in chips above the button: the scan
         // collects one type, so the choice has to be made before it starts, and
-        // the press is the moment the user is thinking about it.
+        // the press is the moment the user is thinking about it. Once the user
+        // answers "don't ask again", the press scans with the remembered type
+        // instead — and the step says so, with the way to change it next to it.
         if (linkEntered) {
             Spacer(Modifier.height(24.dp))
             StepHeading(2, "Analyze the link")
             Spacer(Modifier.height(2.dp))
             // A live region, so the step that just appeared below the field is
-            // announced instead of silently arriving somewhere off-screen.
+            // announced instead of silently arriving somewhere off-screen. It
+            // states what Analyze will do *this* time: with the question turned
+            // off it scans straight away, and a button that started a scan with
+            // a type nobody mentioned would be a surprise.
             Text(
-                "Analyze asks what you want to download — Audio, Video, Images, " +
-                    "Docs or All. It looks for that one type, and All takes every " +
-                    "file in the link.",
+                if (state.askBeforeAnalyzing) {
+                    "Analyze asks what you want to download — Audio, Video, Images, " +
+                        "Docs or All. It looks for that one type, and All takes every " +
+                        "file in the link."
+                } else {
+                    "Analyze looks for ${state.categoryFilter} files without asking, " +
+                        "because you turned the question off. Change type opens it " +
+                        "once more."
+                },
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
                 modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }
             )
             Spacer(Modifier.height(8.dp))
             Button(
-                onClick = { showFilterDialog = true },
+                // The question is asked only when it is still wanted; otherwise
+                // the remembered type is used and the scan starts on the press.
+                onClick = {
+                    if (state.askBeforeAnalyzing) showFilterDialog = true
+                    else viewModel.analyzeWithoutAsking()
+                },
                 enabled = !state.analyzing,
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .semantics {
+                        // Spoken, because with the question off the press starts
+                        // a scan of a type that is not otherwise on screen.
+                        contentDescription = if (state.askBeforeAnalyzing) {
+                            "Analyze link"
+                        } else {
+                            "Analyze the link for ${state.categoryFilter} files, " +
+                                "without asking which type"
+                        }
+                    }
             ) {
                 Text(if (state.analyzing) "Analyzing…" else "Analyze link")
+            }
+            // The way back is here as well as in Settings: with the question
+            // off, this is the only place on Home where the type can be chosen
+            // before a scan, and sending someone into Settings mid-task to fix a
+            // choice they are about to make is a poor trade.
+            if (!state.askBeforeAnalyzing) {
+                Spacer(Modifier.height(4.dp))
+                TextButton(
+                    onClick = { showFilterDialog = true },
+                    modifier = Modifier.semantics {
+                        contentDescription =
+                            "Change type, currently ${state.categoryFilter}, and choose " +
+                                "whether the question is asked again"
+                    }
+                ) {
+                    Text("Change type")
+                }
             }
         }
 
@@ -285,7 +335,11 @@ fun HomeScreen(
             )
         }
 
-        if (state.analyzing) {
+        // Only when the panel is not up: the panel can start a scan of its own,
+        // and it reports that one itself. Two surfaces showing the same scan
+        // would leave a Stop button here that is covered by the sheet and cannot
+        // be reached.
+        if (state.analyzing && !resultsSheetOpen) {
             Spacer(Modifier.height(20.dp))
             CircularProgressIndicator()
             state.scanProgress?.let {
@@ -302,42 +356,65 @@ fun HomeScreen(
 
     val result = state.scanResult
     val visibleFiles = state.visibleFiles
-    if (resultsSheetOpen && result != null) {
+    if (resultsSheetOpen) {
         ModalBottomSheet(onDismissRequest = viewModel::dismissResults) {
-            ScanResultsContent(
-                sourceTitle = result.sourceTitle,
+            // The type control sits outside every state below, so it stays
+            // reachable while a scan runs and when one comes back empty — which
+            // is exactly when the user wants to try another type.
+            ResultsPanelTypeControl(
                 filter = state.categoryFilter,
-                foundCount = result.files.size,
-                limitReached = result.limitReached,
-                scanLimit = result.fileLimit,
-                otherMediaCount = result.otherMediaCount,
-                historyIncomplete = result.historyIncomplete,
-                savedRange = savedRange,
-                files = visibleFiles,
-                selected = state.selected,
-                selectedBytes = state.selectedBytes,
-                unknownSizeCount = state.unknownSizeCount,
-                stage = state.stage,
-                downloading = state.downloading,
-                fileProgress = fileProgress,
-                failures = state.failures,
-                runState = state.runState,
-                folderMessage = folderMessage,
-                onOpenFolder = openFolder,
-                onAcknowledgeRun = viewModel::acknowledgeRun,
-                onToggle = viewModel::toggleSelection,
-                onChooseAll = viewModel::chooseAll,
-                onChooseRange = viewModel::chooseRange,
-                onBackToChoose = viewModel::backToChoose,
-                onSelectRange = viewModel::selectRange,
-                onSearchDeeper = viewModel::searchDeeper,
-                onRescan = viewModel::analyze,
-                onRetry = { messageId -> viewModel.retryFailedDownloads(context, messageId) },
-                keepZipFiles = state.keepZipFiles,
-                onKeepZipFilesChange = viewModel::setKeepZipFiles,
-                onDownload = startDownload,
-                onDownloadZip = startZip
+                downloadRunning = state.downloading,
+                onChoose = viewModel::rescanWithFilter
             )
+            when {
+                state.analyzing -> ResultsPanelScanning(
+                    filter = state.categoryFilter,
+                    progress = state.scanProgress,
+                    onCancel = viewModel::cancelScan
+                )
+
+                result == null || visibleFiles.isEmpty() -> ResultsPanelNothing(
+                    empty = state.emptyResult,
+                    statusMessage = state.statusMessage,
+                    onRescan = viewModel::analyze,
+                    onClose = viewModel::dismissResults
+                )
+
+                else -> ScanResultsContent(
+                    sourceTitle = result.sourceTitle,
+                    filter = state.categoryFilter,
+                    foundCount = result.files.size,
+                    limitReached = result.limitReached,
+                    scanLimit = result.fileLimit,
+                    otherMediaCount = result.otherMediaCount,
+                    historyIncomplete = result.historyIncomplete,
+                    savedRange = savedRange,
+                    files = visibleFiles,
+                    selected = state.selected,
+                    selectedBytes = state.selectedBytes,
+                    unknownSizeCount = state.unknownSizeCount,
+                    stage = state.stage,
+                    downloading = state.downloading,
+                    fileProgress = fileProgress,
+                    failures = state.failures,
+                    runState = state.runState,
+                    folderMessage = folderMessage,
+                    onOpenFolder = openFolder,
+                    onAcknowledgeRun = viewModel::acknowledgeRun,
+                    onToggle = viewModel::toggleSelection,
+                    onChooseAll = viewModel::chooseAll,
+                    onChooseRange = viewModel::chooseRange,
+                    onBackToChoose = viewModel::backToChoose,
+                    onSelectRange = viewModel::selectRange,
+                    onSearchDeeper = viewModel::searchDeeper,
+                    onRescan = viewModel::analyze,
+                    onRetry = { messageId -> viewModel.retryFailedDownloads(context, messageId) },
+                    keepZipFiles = state.keepZipFiles,
+                    onKeepZipFilesChange = viewModel::setKeepZipFiles,
+                    onDownload = startDownload,
+                    onDownloadZip = startZip
+                )
+            }
         }
     }
 
@@ -346,9 +423,10 @@ fun HomeScreen(
     if (showFilterDialog) {
         FilterChoiceDialog(
             selected = state.categoryFilter,
-            onChoose = { category ->
+            dontAskAgain = !state.askBeforeAnalyzing,
+            onChoose = { category, dontAskAgain ->
                 showFilterDialog = false
-                viewModel.analyzeWithFilter(category)
+                viewModel.analyzeWithFilter(category, dontAskAgain)
             },
             onDismiss = { showFilterDialog = false }
         )
@@ -373,22 +451,29 @@ private fun StepHeading(step: Int, text: String) {
  *
  * Confirm-then-scan rather than tap-to-choose: scanning a large channel is a real
  * wait, and one stray tap should not start one.
+ *
+ * **Don't ask again** turns the question into a remembered answer: the type is
+ * kept and the next Analyze scans straight away. Its box starts from the current
+ * preference rather than always unchecked, so the dialog states the truth about
+ * what will happen — and unticking it is how the question is asked again.
  */
 @Composable
 private fun FilterChoiceDialog(
     selected: String,
-    onChoose: (String) -> Unit,
+    dontAskAgain: Boolean,
+    onChoose: (String, Boolean) -> Unit,
     onDismiss: () -> Unit
 ) {
     // Local, so a change of mind inside the dialog scans nothing until Analyze is
     // pressed. Keyed on the current choice, so reopening shows what is set now.
     var choice by rememberSaveable(selected) { mutableStateOf(selected) }
+    var skipQuestion by rememberSaveable(dontAskAgain) { mutableStateOf(dontAskAgain) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("What do you want to download?") },
         text = {
-            Column(modifier = Modifier.selectableGroup()) {
+            Column {
                 Text(
                     "The scan looks for the type you pick. " +
                         "\"${AppPreferences.CATEGORY_ALL}\" takes every file in the " +
@@ -397,42 +482,90 @@ private fun FilterChoiceDialog(
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f)
                 )
                 Spacer(Modifier.height(4.dp))
-                for (category in AppPreferences.DOWNLOAD_CATEGORIES) {
-                    val isSelected = choice == category
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .selectable(
+                // Only the options are a selectable group. The "don't ask again"
+                // box below is a switch, and folding it into the group would have
+                // a screen reader announce it as one of the mutually exclusive
+                // choices when it is not one.
+                Column(modifier = Modifier.selectableGroup()) {
+                    for (category in AppPreferences.DOWNLOAD_CATEGORIES) {
+                        val isSelected = choice == category
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .selectable(
+                                    selected = isSelected,
+                                    role = Role.RadioButton,
+                                    onClick = { choice = category }
+                                )
+                                // A full row per option, so the whole line is the
+                                // target rather than the 20dp radio circle.
+                                .padding(vertical = 10.dp)
+                        ) {
+                            RadioButton(
                                 selected = isSelected,
-                                role = Role.RadioButton,
-                                onClick = { choice = category }
+                                onClick = null,
+                                modifier = Modifier.clearAndSetSemantics { }
                             )
-                            // A full row per option, so the whole line is the
-                            // target rather than the 20dp radio circle.
-                            .padding(vertical = 10.dp)
-                    ) {
-                        RadioButton(
-                            selected = isSelected,
-                            onClick = null,
-                            modifier = Modifier.clearAndSetSemantics { }
+                            Spacer(Modifier.width(8.dp))
+                            Text(category, style = MaterialTheme.typography.bodyLarge)
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(12.dp))
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .toggleable(
+                            value = skipQuestion,
+                            role = Role.Checkbox,
+                            onValueChange = { skipQuestion = it }
                         )
-                        Spacer(Modifier.width(8.dp))
-                        Text(category, style = MaterialTheme.typography.bodyLarge)
+                        .semantics {
+                            contentDescription = "Don't ask again"
+                            stateDescription =
+                                if (skipQuestion) "Checked" else "Not checked"
+                        }
+                        .padding(vertical = 8.dp)
+                ) {
+                    Checkbox(
+                        checked = skipQuestion,
+                        onCheckedChange = null,
+                        modifier = Modifier.clearAndSetSemantics { }
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Column {
+                        Text("Don't ask again", style = MaterialTheme.typography.bodyLarge)
+                        // Names the type, so the box is not a promise about an
+                        // unnamed decision — and says where it can be undone.
+                        Text(
+                            "Uses $choice for every scan. You can change this in Settings.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                        )
                     }
                 }
             }
         },
         confirmButton = {
             Button(
-                onClick = { onChoose(choice) },
+                onClick = { onChoose(choice, skipQuestion) },
                 modifier = Modifier.semantics {
-                    // Names the action it is about to take, including the type,
-                    // so the press is never a guess.
-                    contentDescription = if (choice == AppPreferences.CATEGORY_ALL) {
-                        "Analyze the link for every file"
-                    } else {
-                        "Analyze the link for $choice files"
+                    // Names the action it is about to take, including the type
+                    // and whether it will be asked again, so the press is never
+                    // a guess.
+                    contentDescription = buildString {
+                        if (choice == AppPreferences.CATEGORY_ALL) {
+                            append("Analyze the link for every file")
+                        } else {
+                            append("Analyze the link for $choice files")
+                        }
+                        append(
+                            if (skipQuestion) ", and stop asking which type"
+                            else ""
+                        )
                     }
                 }
             ) {
@@ -528,6 +661,175 @@ private fun FailedDownloadsCard(
                 TextButton(onClick = onDismiss) { Text("Dismiss") }
             }
         }
+    }
+}
+
+/**
+ * The file type, offered from inside the results panel.
+ *
+ * The scan collects exactly one type, so the type is the scan's own parameter —
+ * and it is the answer most often revised once the count is in ("no Audio?" →
+ * try Video). Sending the user back to the link field to change their mind meant
+ * walking away from the results they were reacting to, then looking at them again
+ * through a sheet that had just closed. Here the count and the control that
+ * changes it are on the same screen.
+ *
+ * Choosing a type scans straight away rather than waiting for a second press:
+ * the user is looking at a scan's output and asking for that output to be
+ * different, which is one intention, not two. Tapping the type that is already
+ * selected does nothing, since it would ask for the list already on screen.
+ *
+ * The chips are held closed while a download is running: a rescan clears the
+ * rows, and those rows are where the per-file progress is. The download itself
+ * would survive, but the user would lose sight of it — so the note says why
+ * rather than leaving a control that has silently gone dead.
+ */
+@Composable
+private fun ResultsPanelTypeControl(
+    filter: String,
+    downloadRunning: Boolean,
+    onChoose: (String) -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp)
+    ) {
+        Text(
+            "File type",
+            style = MaterialTheme.typography.titleSmall,
+            modifier = Modifier.semantics { heading() }
+        )
+        Spacer(Modifier.height(2.dp))
+        Text(
+            if (downloadRunning) {
+                "A download is running. The file type can be changed when it finishes."
+            } else {
+                "One type per scan. Choosing one scans this channel again for it."
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+        )
+        Spacer(Modifier.height(8.dp))
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            // Exactly the Settings set, as everywhere else in the app.
+            for (category in AppPreferences.DOWNLOAD_CATEGORIES) {
+                val isSelected = filter == category
+                FilterChip(
+                    selected = isSelected,
+                    enabled = !downloadRunning,
+                    onClick = { if (!isSelected) onChoose(category) },
+                    label = { Text(category) },
+                    modifier = Modifier.semantics {
+                        role = Role.RadioButton
+                        stateDescription = if (isSelected) "Selected" else "Not selected"
+                    }
+                )
+            }
+        }
+        Spacer(Modifier.height(4.dp))
+    }
+}
+
+/**
+ * The panel while it is scanning again, after the type was changed from inside
+ * it.
+ *
+ * The type being scanned is stated in a live region, because the rows the user
+ * was looking at have just been cleared and something has to explain the gap.
+ * The per-page progress below it is deliberately not a live region — on a large
+ * channel it ticks once per history page, and announcing every page would bury
+ * the sentence that matters.
+ */
+@Composable
+private fun ResultsPanelScanning(
+    filter: String,
+    progress: String?,
+    onCancel: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp)
+            .semantics { paneTitle = "Scanning" }
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }
+        ) {
+            CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+            Spacer(Modifier.width(12.dp))
+            Text(
+                if (filter == AppPreferences.CATEGORY_ALL) {
+                    "Scanning again for every file type."
+                } else {
+                    "Scanning again for $filter files."
+                },
+                style = MaterialTheme.typography.bodyMedium
+            )
+        }
+        progress?.let {
+            Spacer(Modifier.height(8.dp))
+            Text(
+                it,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+            )
+        }
+        Spacer(Modifier.height(8.dp))
+        TextButton(onClick = onCancel) { Text("Stop scanning") }
+        Spacer(Modifier.height(24.dp))
+    }
+}
+
+/**
+ * The panel when there is nothing to list: a scan that found no files of the
+ * chosen type, or one that was stopped.
+ *
+ * It stays open rather than collapsing, because the type control above is the
+ * answer to both — "No Video files found" is a statement about one type, and the
+ * way to act on it is one tap up.
+ */
+@Composable
+private fun ResultsPanelNothing(
+    empty: DownloadViewModel.EmptyResult?,
+    statusMessage: String?,
+    onRescan: () -> Unit,
+    onClose: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp)
+    ) {
+        when {
+            empty != null -> EmptyResultCard(empty)
+            statusMessage != null -> Text(
+                statusMessage,
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }
+            )
+            else -> Text(
+                "No files are listed for this type.",
+                style = MaterialTheme.typography.bodyMedium
+            )
+        }
+        Spacer(Modifier.height(12.dp))
+        // Retrying the same type on purpose: an unfinished walk, or one that was
+        // stopped, is fixed by asking again — not by changing the type.
+        OutlinedButton(onClick = onRescan, modifier = Modifier.fillMaxWidth()) {
+            Text("Scan again")
+        }
+        Spacer(Modifier.height(4.dp))
+        TextButton(onClick = onClose, modifier = Modifier.fillMaxWidth()) {
+            Text("Close results")
+        }
+        Spacer(Modifier.height(24.dp))
     }
 }
 
@@ -665,11 +967,11 @@ private fun ScanResultsContent(
             stage == DownloadViewModel.SelectionStage.CHOOSE
         ) {
             // The scan only looked for the chosen type, so say what else is
-            // here — otherwise a user who picked the wrong chip has no way to
-            // find out without scanning again.
+            // here — with the control that acts on it named, since the type is
+            // changeable from the panel the note appears in.
             Text(
                 "This channel also has about $otherMediaCount other media file(s). " +
-                    "Change the file type to scan for those.",
+                    "Choose another file type above to scan for those.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
             )

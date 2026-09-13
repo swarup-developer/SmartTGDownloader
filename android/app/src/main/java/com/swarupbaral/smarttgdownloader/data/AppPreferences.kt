@@ -212,6 +212,27 @@ class AppPreferences(context: Context) {
         _defaultCategory.value = value
     }
 
+    private val _askBeforeAnalyzing =
+        MutableStateFlow(prefs.getBoolean(KEY_ASK_BEFORE_ANALYZING, true))
+
+    /**
+     * Whether pressing Analyze asks which file type to look for.
+     *
+     * On by default: the scan collects one type, so which one is a decision the
+     * user has to make before it starts. Turning it off is the "don't ask again"
+     * answer to that question, and the type it then uses is [defaultCategory] —
+     * the same value Settings shows, so the remembered answer and the setting
+     * cannot drift apart. It is a preference rather than a one-way switch: the
+     * question can always be asked again, from the dialog itself or from
+     * Settings.
+     */
+    val askBeforeAnalyzing: StateFlow<Boolean> = _askBeforeAnalyzing.asStateFlow()
+
+    fun setAskBeforeAnalyzing(value: Boolean) {
+        prefs.edit().putBoolean(KEY_ASK_BEFORE_ANALYZING, value).apply()
+        _askBeforeAnalyzing.value = value
+    }
+
     private val _zipKeepsFiles = MutableStateFlow(prefs.getBoolean(KEY_ZIP_KEEPS_FILES, false))
 
     /**
@@ -260,6 +281,7 @@ class AppPreferences(context: Context) {
         private const val KEY_RANGE_TO = "range_to"
         private const val KEY_LEGACY_MIGRATION_DONE = "legacy_migration_done"
         private const val KEY_ZIP_KEEPS_FILES = "zip_keeps_files"
+        private const val KEY_ASK_BEFORE_ANALYZING = "ask_before_analyzing"
 
         private const val DEFAULT_DYNAMIC_COLOR = false
 
@@ -305,3 +327,19 @@ class AppPreferences(context: Context) {
         }
     }
 }
+
+/**
+ * The type a scan uses when the analyze question is skipped.
+ *
+ * A remembered value this build does not recognise falls back to
+ * [AppPreferences.CATEGORY_ALL] instead of being handed to the scan. That case
+ * is not hypothetical: the preference outlives the build that wrote it, so a
+ * type removed or renamed by a later version would arrive here as a value
+ * nothing can match. The scan would then collect nothing and report an empty
+ * channel — the most misleading possible answer, since it blames the channel for
+ * what is really a stale setting. "All" is also the right fallback on its own
+ * terms: it means every file, so nothing is silently excluded.
+ */
+fun rememberedAnalyzeCategory(saved: String?): String =
+    saved?.trim()?.takeIf { it in AppPreferences.DOWNLOAD_CATEGORIES }
+        ?: AppPreferences.CATEGORY_ALL

@@ -15,6 +15,7 @@ import com.swarupbaral.smarttgdownloader.data.ZipRequest
 import com.swarupbaral.smarttgdownloader.data.QueuedDownload
 import com.swarupbaral.smarttgdownloader.data.SavedRange
 import com.swarupbaral.smarttgdownloader.data.TelegramRepository
+import com.swarupbaral.smarttgdownloader.data.rememberedAnalyzeCategory
 import com.swarupbaral.smarttgdownloader.data.resolveChannelSettings
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -119,7 +120,25 @@ class DownloadViewModel : ViewModel() {
          * Mirrored from preferences so the checkbox beside the ZIP button and the
          * request that gets queued can never disagree.
          */
-        val keepZipFiles: Boolean = false
+        val keepZipFiles: Boolean = false,
+        /**
+         * Whether pressing Analyze asks which type to look for.
+         *
+         * Mirrored from preferences so the button, the question it opens and the
+         * type a skipped question scans for can never disagree.
+         */
+        val askBeforeAnalyzing: Boolean = true,
+        /**
+         * Whether the results panel is up.
+         *
+         * An explicit flag rather than "there are results to show": the panel
+         * offers its own way to change the file type and scan again, and a
+         * rescan deliberately clears the old rows — old "Audio" rows say nothing
+         * about "Video". Deriving it from the rows would close the panel at the
+         * exact moment the user asked it to do something, dropping them back on
+         * the link field to watch a scan they started from inside the panel.
+         */
+        val panelOpen: Boolean = false
     ) {
         /** Files from the last scan that pass the active filter. */
         val visibleFiles: List<TelegramRepository.ScannedFile>
@@ -197,6 +216,14 @@ class DownloadViewModel : ViewModel() {
         viewModelScope.launch {
             AppContainer.appPreferences.zipKeepsFiles.collect { keep ->
                 _uiState.value = _uiState.value.copy(keepZipFiles = keep)
+            }
+        }
+
+        // Whether Analyze asks which type to use. A flow rather than a field:
+        // the answer can be changed from Settings while Home is on screen.
+        viewModelScope.launch {
+            AppContainer.appPreferences.askBeforeAnalyzing.collect { ask ->
+                _uiState.value = _uiState.value.copy(askBeforeAnalyzing = ask)
             }
         }
 
@@ -370,9 +397,48 @@ class DownloadViewModel : ViewModel() {
      * it in one call keeps the two from being separated by a recomposition in
      * which the filter is set but nothing is scanning, or worse, scanning with
      * the previous type.
+     *
+     * [dontAskAgain] is the dialog's box of the same name: the type is remembered
+     * and the question stops appearing. It is written on every answer rather than
+     * only when ticked, so unticking it in the dialog — or in Settings — is the
+     * way back to being asked.
      */
-    fun analyzeWithFilter(category: String) {
-        setFilter(category)
+    fun analyzeWithFilter(category: String, dontAskAgain: Boolean = false) {
+        // Remembered either way, not only when the question is switched off: the
+        // answer that skips the question is the user's only way of saying which
+        // type they want, so keeping it is what makes skipping useful rather
+        // than merely quiet.
+        val remembered = rememberedAnalyzeCategory(category)
+        AppContainer.appPreferences.setDefaultCategory(remembered)
+        AppContainer.appPreferences.setAskBeforeAnalyzing(!dontAskAgain)
+        setFilter(remembered)
+        analyze()
+    }
+
+    /**
+     * Starts the walk with the remembered type, without showing the question.
+     *
+     * The remembered value is validated first, so a stale preference cannot make
+     * the scan collect nothing and report an empty channel.
+     */
+    fun analyzeWithoutAsking() {
+        val remembered = rememberedAnalyzeCategory(
+            AppContainer.appPreferences.defaultCategory.value
+        )
+        // Adopted without writing anything back: this is the app-wide answer that
+        // skipped the question, not a new choice about whichever channel happens
+        // to still be loaded from a previous analysis.
+        val state = _uiState.value
+        if (state.categoryFilter != remembered) {
+            _uiState.value = state.copy(
+                categoryFilter = remembered,
+                scanResult = null,
+                scannedFilter = null,
+                selected = emptySet(),
+                stage = SelectionStage.CHOOSE,
+                emptyResult = null
+            )
+        }
         analyze()
     }
 
@@ -437,6 +503,11 @@ class DownloadViewModel : ViewModel() {
                     categoryFilter = filter,
                     scannedFilter = filter,
                     scanResult = result,
+                    // Opens the panel where a scan found something, as before. A
+                    // panel that is already open stays open either way, so a
+                    // rescan from inside it — including one that finds nothing —
+                    // is answered where it was asked rather than by vanishing.
+                    panelOpen = _uiState.value.panelOpen || result.files.isNotEmpty(),
                     // Nothing is selected yet: the first thing the user is told
                     // is how many files there are, then they choose to take all
                     // of them or a range of them.
@@ -621,12 +692,33 @@ class DownloadViewModel : ViewModel() {
 
     fun dismissResults() {
         _uiState.value = _uiState.value.copy(
+            panelOpen = false,
             scanResult = null,
             scannedFilter = null,
             selected = emptySet(),
             stage = SelectionStage.CHOOSE,
             emptyResult = null
         )
+    }
+
+    /**
+     * Changes the type of the loaded scan and scans again, from inside the
+     * results panel.
+     *
+     * Deliberately not [analyzeWithFilter]: that one is the answer to the analyze
+     * question, and it writes the asking preference. A change made here is not an
+     * answer to that question, so it leaves it alone — otherwise changing the type
+     * in the panel would silently switch the question on or off.
+     *
+     * The type is still remembered: it becomes the app-wide default, so the next
+     * link the user pastes starts from what they chose here instead of going back
+     * to whatever the last dialog answer was.
+     */
+    fun rescanWithFilter(category: String) {
+        val remembered = rememberedAnalyzeCategory(category)
+        AppContainer.appPreferences.setDefaultCategory(remembered)
+        setFilter(remembered)
+        analyze()
     }
 
     /**
