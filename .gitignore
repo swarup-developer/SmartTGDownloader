@@ -120,3 +120,6 @@ test.py
 # Orphan asset carried in the working tree; not referenced by the Windows
 # build, the app source, or CI.
 windows_desktop/assets/
+
+# Local embedded Telegram API credentials (generated in CI from secrets)
+windows_desktop/smarttgdownloader/_secrets.py

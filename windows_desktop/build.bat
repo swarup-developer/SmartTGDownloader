@@ -44,17 +44,22 @@ if not exist build_src\smarttgdownloader\__init__.py goto :error
 echo.
 echo === Creating setup.py for Cython compilation ===
 > build_src\setup.py (
+    echo import os
     echo from setuptools import setup
     echo from Cython.Build import cythonize
+    echo.
+    echo modules = [
+    echo     "smarttgdownloader/utils.py",
+    echo     "smarttgdownloader/worker.py",
+    echo     "smarttgdownloader/ui.py",
+    echo ]
+    echo if os.path.exists^("smarttgdownloader/_secrets.py"^):
+    echo     modules.append^("smarttgdownloader/_secrets.py"^)
     echo.
     echo setup^(
     echo     name="smarttgdownloader",
     echo     ext_modules=cythonize^(
-    echo         [
-    echo             "smarttgdownloader/utils.py",
-    echo             "smarttgdownloader/worker.py",
-    echo             "smarttgdownloader/ui.py",
-    echo         ],
+    echo         modules,
     echo         compiler_directives={
     echo             "language_level": "3",
     echo             "embedsignature": False,

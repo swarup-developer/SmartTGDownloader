@@ -35,6 +35,18 @@ jobs:
           echo "VERSION=$VERSION" >> $GITHUB_ENV
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
+      - name: Expose Telegram API credentials
+        shell: bash
+        env:
+          TG_API_ID: ${{ secrets.TG_API_ID }}
+          TG_API_HASH: ${{ secrets.TG_API_HASH }}
+        run: |
+          if [ -z "$TG_API_ID" ] || [ -z "$TG_API_HASH" ]; then
+            echo "::warning::TG_API_ID/TG_API_HASH secrets are not set; the build will not include embedded credentials."
+            exit 0
+          fi
+          python -c "import os; open('windows_desktop/smarttgdownloader/_secrets.py', 'w', encoding='utf-8').write(f'EMBEDDED_API_ID = {int(os.environ[\"TG_API_ID\"])}\nEMBEDDED_API_HASH = {os.environ[\"TG_API_HASH\"]!r}\n')"
+
       - name: Build Windows executable
         run: |
           cd windows_desktop
