@@ -95,6 +95,11 @@ jobs:
         run: |
           python .github/workflows/extract_changelog.py ${{ env.VERSION_NAME }}
 
+      - name: Rename release APK with version
+        run: |
+          cp android/app/build/outputs/apk/release/app-release.apk \
+             "android/app/build/outputs/apk/release/SmartTGDownloader-v${{ env.VERSION_NAME }}.apk"
+
       - name: Create and Upload GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -102,7 +107,7 @@ jobs:
           name: SmartTG Downloader Android v${{ env.VERSION_NAME }}
           body_path: release_notes.txt
           files: |
-            android/app/build/outputs/apk/release/app-release.apk
+            android/app/build/outputs/apk/release/SmartTGDownloader-v${{ env.VERSION_NAME }}.apk
           draft: false
           prerelease: false
         env:

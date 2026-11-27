@@ -58,13 +58,19 @@ jobs:
         run: |
           python .github/workflows/extract_changelog.py ${{ env.VERSION }}
 
+      - name: Rename release executable with version
+        shell: bash
+        run: |
+          cp windows_desktop/dist/SmartTGDownloader.exe \
+             "windows_desktop/dist/SmartTGDownloader-v${{ env.VERSION }}.exe"
+
       - name: Create and Upload GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ env.VERSION }}-windows
           name: SmartTG Downloader Windows v${{ env.VERSION }}
           body_path: release_notes.txt
-          files: windows_desktop/dist/SmartTGDownloader.exe
+          files: windows_desktop/dist/SmartTGDownloader-v${{ env.VERSION }}.exe
           draft: false
           prerelease: false
         env:
