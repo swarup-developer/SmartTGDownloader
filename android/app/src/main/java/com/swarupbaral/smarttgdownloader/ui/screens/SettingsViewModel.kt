@@ -66,13 +66,15 @@ class SettingsViewModel : ViewModel() {
     }
 
     /**
-     * The app's filter options. Shared with the Home and History screens, so
-     * every filter control in the app edits one value, not three.
+     * The type a scan uses by default (and automatically when the analyze
+     * question is skipped).
      */
     val defaultCategory: StateFlow<String> = AppContainer.appPreferences.defaultCategory
 
     fun setDefaultCategory(value: String) {
-        AppContainer.appPreferences.setDefaultCategory(value)
+        if (value in AppPreferences.DOWNLOAD_CATEGORIES) {
+            AppContainer.appPreferences.setDefaultCategory(value)
+        }
     }
 
     /**
@@ -104,6 +106,18 @@ class SettingsViewModel : ViewModel() {
     /** Every channel with remembered preferences, most recently used first. */
     val channels: StateFlow<List<ChannelSettings>> = AppContainer.channelPreferences.channels
 
+    /**
+     * Sets one remembered channel's scan limit.
+     *
+     * Here as well as in the results panel's *Search deeper* because that action
+     * only exists after a scan has been cut short: a channel that has never been
+     * analyzed, or one whose limit should be lowered rather than raised, can only
+     * be reached from its own row.
+     */
+    fun setChannelScanLimit(chatId: Long, limit: Int) {
+        AppContainer.channelPreferences.setScanLimit(chatId, limit)
+    }
+
     fun forgetChannel(chatId: Long) {
         AppContainer.channelPreferences.forget(chatId)
     }
@@ -119,11 +133,5 @@ class SettingsViewModel : ViewModel() {
 
     fun setDownloadNetwork(value: DownloadNetwork) {
         AppContainer.appPreferences.setDownloadNetwork(value)
-    }
-
-    fun logOut() {
-        viewModelScope.launch {
-            runCatching { repository.logOut() }
-        }
     }
 }

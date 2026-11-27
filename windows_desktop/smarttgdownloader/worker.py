@@ -426,6 +426,8 @@ class TelegramWorker:
             return True
         except Exception:
             return False
+        finally:
+            self.client = None
 
     async def logout_client(self):
         try:
@@ -436,6 +438,8 @@ class TelegramWorker:
             return True
         except Exception:
             return False
+        finally:
+            self.client = None
 
     async def check_for_updates(self):
         try:
@@ -486,23 +490,28 @@ class TelegramWorker:
 
     def is_newer_version(self, latest, current):
         try:
-            l = [int(x) for x in latest.split('.')]
-            c = [int(x) for x in current.split('.')]
-            for i in range(3):
-                if l[i] > c[i]: return True
-                if l[i] < c[i]: return False
-        except:
-            pass
-        return False
+            l = tuple(int(x) for x in str(latest).strip().split('.'))
+            c = tuple(int(x) for x in str(current).strip().split('.'))
+            max_len = max(len(l), len(c))
+            l = l + (0,) * (max_len - len(l))
+            c = c + (0,) * (max_len - len(c))
+            return l > c
+        except Exception:
+            return False
 
     async def perform_update(self, download_url):
+        import urllib.request
+        import ssl
+        import sys
+        import subprocess
+        from pathlib import Path
+
+        if not getattr(sys, "frozen", False):
+            self.update_gui("Self-update is only supported in the packaged Windows .exe build.", True)
+            return False
+
+        temp_exe = Path(sys.executable).parent / "SmartTGDownloader_new.exe"
         try:
-            import urllib.request
-            import ssl
-            import sys
-            import subprocess
-            from pathlib import Path
-            
             self.update_gui("Downloading Update... 0%")
             
             ctx = ssl.create_default_context()
@@ -513,7 +522,6 @@ class TelegramWorker:
             loop = asyncio.get_event_loop()
             
             def download_file():
-                temp_exe = Path(sys.executable).parent / "SmartTGDownloader_new.exe"
                 with urllib.request.urlopen(req, context=ctx, timeout=15) as response:
                     total_size = int(response.headers.get('content-length', 0))
                     downloaded = 0
@@ -530,7 +538,7 @@ class TelegramWorker:
                                 wx.CallAfter(self.update_gui, f"Downloading Update... {percent}%")
                 return temp_exe
 
-            temp_exe = await loop.run_in_executor(None, download_file)
+            await loop.run_in_executor(None, download_file)
             self.update_gui("Update Downloaded. Restarting...")
             
             current_exe = sys.executable
@@ -542,13 +550,21 @@ move /y "{temp_exe}" "{current_exe}"
 start "" "{current_exe}"
 del "%~f0"
 """
-            with open(batch_path, "w") as f:
+            with open(batch_path, "w", encoding="utf-8") as f:
                 f.write(batch_content)
                 
-            subprocess.Popen([str(batch_path)], shell=True)
+            subprocess.Popen(
+                ["cmd", "/c", str(batch_path)],
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            )
             wx.CallAfter(wx.GetApp().Exit)
             return True
         except Exception as e:
+            try:
+                if temp_exe.exists():
+                    temp_exe.unlink()
+            except Exception:
+                pass
             self.update_gui(f"Update failed: {e}", True)
             return False
 
@@ -576,17 +592,19 @@ del "%~f0"
                 raise RuntimeError("Session expired. Please log in again.")
 
             self.apply_transfer_settings()
-            wx.CallAfter(self.progress_callback, "START_DIALOG", 0, 0)
+            wx.CallAfter(self.progress_callback, "START_DIALOG", "scan", 0)
+            wx.CallAfter(self.progress_callback, "STATUS_TEXT", "Resolving Telegram link...", 0)
             wx.CallAfter(self.progress_callback, "LOG", "Starting link analysis...", 0)
 
             entity_ref, msg_id = self._parse_link(link)
             entity = await self._resolve_entity(entity_ref)
             title = self._entity_title(entity)
-            filters = filter_types or ["Audio", "Video"]
+            filters = normalize_filter_selection(filter_types)
             source_counts = {"Audio": 0, "Video": 0, "Images": 0, "Docs": 0}
             matched_counts = {"Audio": 0, "Video": 0, "Images": 0, "Docs": 0}
             matched_items = []
 
+            wx.CallAfter(self.progress_callback, "STATUS_TEXT", f"Scanning {title}...", 0)
             wx.CallAfter(self.progress_callback, "LOG", f"Scanning source: {title}", 0)
 
             if msg_id:
@@ -639,6 +657,13 @@ del "%~f0"
                             }
                         )
 
+                    if scanned % 50 == 0:
+                        wx.CallAfter(
+                            self.progress_callback,
+                            "STATUS_TEXT",
+                            f"Scanning {title}: {scanned} messages checked, {len(matched_items)} matched",
+                            0
+                        )
                     if scanned % 200 == 0:
                         wx.CallAfter(self.progress_callback, "LOG", f"Scanned {scanned} messages...", 0)
                     if scanned % 500 == 0:
@@ -724,7 +749,7 @@ del "%~f0"
         total_size = sum(item["size"] for item in selected_items)
 
         try:
-            wx.CallAfter(self.progress_callback, "START_DIALOG", 0, 0)
+            wx.CallAfter(self.progress_callback, "START_DIALOG", "download", 0)
             wx.CallAfter(
                 self.progress_callback,
                 "LOG",
@@ -782,14 +807,9 @@ del "%~f0"
             await self._wait_if_paused()
 
             clean_name = self._get_clean_filename_str(msg)
-            clean_chan = re.sub(r'[<>:"/\\|?*]', '', title).strip()
-            
-            mime = self._message_mime_type(msg)
-            subfolder = "Docs"
-            if mime.startswith("audio"): subfolder = "Audio"
-            elif mime.startswith("video"): subfolder = "Video"
-            elif mime.startswith("image"): subfolder = "Images"
-            
+            clean_chan = sanitize_folder_name(title)
+            subfolder = self._category_for_message(msg) or "Docs"
+
             folder = DOWNLOAD_ROOT / clean_chan / subfolder
             folder.mkdir(parents=True, exist_ok=True)
             path = self._build_download_path(folder, clean_name, getattr(msg, "id", None))
@@ -873,6 +893,8 @@ del "%~f0"
                 wx.CallAfter(self.progress_callback, "LOG", f"Completed: {path.name}", 0)
                 return True
             except asyncio.CancelledError:
+                if download_offset == 0 and path.exists() and path.stat().st_size == 0:
+                    path.unlink(missing_ok=True)
                 wx.CallAfter(self.progress_callback, "LOG", f"Cancelled: {path.name}", 0)
                 return False
             except Exception as e:
@@ -892,6 +914,8 @@ del "%~f0"
                             return True
                 except Exception:
                     pass
+                if download_offset == 0 and path.exists() and path.stat().st_size == 0:
+                    path.unlink(missing_ok=True)
                 wx.CallAfter(self.progress_callback, "LOG", f"Error downloading {path.name}: {e}", 0)
                 return False
 

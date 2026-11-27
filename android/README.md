@@ -507,6 +507,79 @@ relevant controls are on screen at a time.
   every send, so a repeat resend is spoken again rather than being swallowed as
   an unchanged node.
 
+## Navigation: the menu, and how Settings is organised
+
+Every screen after sign-in has a **menu** — a hamburger in the leading position
+on Home and History, and in the top bar of Settings — which opens a drawer
+listing the whole app:
+
+- **Home** and **History**, first, because that is where the app's work is done;
+- then each **Settings group** as its own entry — Account, Appearance, Analysis,
+  Downloads, Channels, Updates — so a group is one tap from anywhere instead of
+  a tap plus a section choice;
+- and **Sign out** last, below a divider, because it is not a destination: it ends
+  the session rather than going somewhere. It asks first, in the one confirmation
+  dialog the app has for it, and the **Account** group is informational — it shows
+  who is signed in, and says where signing out lives, rather than holding a second
+  copy of the button.
+
+The drawer is disabled on the intro and login screens: before a session exists
+there is nowhere for it to lead. The bottom bar stays as it was, because Home
+and History are switched between far more often than anything else.
+
+The group is held by the shell, not by the Settings screen, so the two can never
+disagree: the menu item marked as current is the group the screen is really on,
+including when the group was changed from the screen's own section row. Opening
+Settings from the menu leaves **one** entry on the back stack whatever group it
+shows, so leaving Settings returns the user where they were rather than through
+every group they looked at.
+
+Settings itself shows one group at a time, with a row of section chips above the
+content. It used to be a single long column: reachable only by scrolling past
+the groups above it, which also meant the screen could not say what any one
+group was for without the others crowding it. Each group now opens with its own
+heading and a line saying what it covers, and the heading is a polite live
+region, so switching sections is announced instead of arriving silently.
+
+Two behaviours changed with the move:
+
+- **Logging out is confirmed, and it is in the menu.** It ends the Telegram
+  session, so it asks first and says what is kept (downloads and history stay)
+  and what is needed to come back (the phone number and a new code). Previously
+  it happened on the first tap of a button in a scrolling list, and it now lives
+  in the menu rather than in Settings, so it is reachable from every screen. One
+  side effect of moving it: the login screen now *replaces* the app's screens on
+  the back stack instead of stacking on top of them, because Back from a
+  signed-out Home screen could only lead to screens whose calls fail.
+- **Forgetting every channel's preferences** is coloured as the destructive
+  action it is, matching *Clear history* in History. The two remove the same
+  kind of thing — something the user cannot get back — and only one of them
+  looked like it.
+
+### One app name, one set of margins
+
+The app is **Smart TG Downloader** everywhere it names itself (intro, Home
+heading, menu header, about line, update prompt). Home used to shorten it to "TG
+Downloader", and History's heading said "Download history" while its tab and menu
+entry said "History". Content margins are 16dp on Home, History and Settings —
+Home had 24dp, which read as one of the three being wrong rather than as a
+deliberate difference — and action buttons that stand alone are full width, as
+*Open Downloads folder* now is.
+
+### Styling: the container tones are part of the palette
+
+The colour schemes set the container roles explicitly (`surfaceVariant`,
+`surfaceContainer*`, `onSurfaceVariant`, `outlineVariant`) in both light and
+dark. Only `background` and `surface` were set before, so everything drawn in a
+container tone — filled cards, menus, the bottom sheet, the new drawer — fell
+back to the stock neutral greys and sat on the navy background as if from a
+different app. Material You (Android 12+) still overrides the whole scheme when
+*Use wallpaper colors* is on, which is the point of that setting.
+
+The bottom bar's icons carry no description: each item already has a visible
+label, and the item folds the icon and label into one node, so describing the
+icon made TalkBack read the tab twice.
+
 ## The Home flow, in order
 
 1. **Paste the link.** The analyze step appears below the field once there is a
@@ -521,8 +594,12 @@ The dialog appears *on the press* rather than as chips waiting above the button,
 because the choice belongs to the scan about to run: the type is settled at the
 moment the user asks for one. It confirms rather than acting on the first tap,
 and the dialog's own list is the same `All / Audio / Video / Images / Docs` set
-Settings offers — no screen invents a type the others do not know about. The
-choice is remembered, so reopening the dialog shows what is set now.
+History's filter uses — no screen invents a type the others do not know about.
+The answer is given here and nowhere else: the type belongs to the scan about to
+run, so offering it a second time in Settings would be a control for a link that
+is not yet known, and offering it in the results panel would be a second copy of
+the very question just answered. The choice is remembered, so reopening the
+dialog shows what is set now.
 
 **Don't ask again** is the dialog's one other control. Ticked, the answer becomes
 the remembered one: pressing Analyze scans for that type straight away, and the
@@ -531,9 +608,9 @@ because you turned the question off"* — with **Change type** beside the button
 reopening the dialog. Unticking the box, or the **Ask which type before
 analyzing** switch in Settings, is how the question comes back; neither is hidden,
 which matters because a preference that can only be set and not unset is a trap.
-The switch lives under *Default filter* because that value is what a skipped
-question uses: one remembered type, shown in exactly one place, rather than a
-private copy that could drift from what Settings says.
+The switch sits in Settings under *File type*, beside the sentence that names the
+type a skipped question will use — together they are the one place a user can see
+which type runs without being asked, and turn the asking back on.
 
 A remembered type this build does not recognise (a value written by a newer
 version, or a corrupted preference) falls back to `All` rather than being handed
@@ -542,8 +619,9 @@ blaming the channel for a bad setting, and the most misleading answer the app ca
 give.
 3. **The count is announced**: *"200 Audio files found. Do you want to download
    all 200 files, or would you like to select a range?"*
-4. **Download all, or select a range** (numbers or the Newest 10/20/50/100
-   presets).
+4. **Download all, or choose a range.** *Download all 200 files* takes the lot;
+   the **Range** combobox beside it offers *Newest 10 / 20 / 50 / 100 files* and
+   *Custom range…*, which is the only entry that opens the two number fields.
 5. **The size is stated before anything is fetched**: *"You have selected 50
    file(s). The total download size is 2.5 GB."*
 6. **Start download.**
@@ -553,38 +631,63 @@ results that were collected for the previous type — old rows for "Audio" say
 nothing about "Video", and leaving them on screen would invite downloading files
 that were never looked for.
 
-### Changing the type from the results panel
+### Where the file type is chosen
 
-The results panel carries its own **File type** control, the same
-`All / Audio / Video / Images / Docs` set as everywhere else. Choosing a type
-scans again immediately: the user is looking at a scan's output and asking for it
-to be different, which is one intention, not two. Tapping the type that is already
-selected does nothing rather than starting a redundant scan. Whatever is chosen
-is remembered as the default filter, so the next link starts there — but this does
-**not** touch the *Ask which type before analyzing* preference, because a change
-made here is not an answer to that question.
+The type is chosen in exactly one place: the question Analyze asks. The results
+panel used to carry its own **File type** chips as well, and they are gone. Two
+surfaces offering the same set is two surfaces that can disagree about what the
+scan looked for, and the panel's copy changed the type without being an answer to
+the question that had just been given.
 
-The panel stays open across that rescan, which is why it is gated on an explicit
-open flag rather than on there being rows to show: a rescan clears the rows it is
-replacing, so deriving the panel's existence from them would close it at the exact
-moment the user asked it to do something. While the rescan runs the panel says
-which type it is scanning for, offers **Stop scanning**, and keeps the type
-control in place — as it does for a scan that comes back with nothing, since
-*"No Video files found"* is a statement about one type and the way to act on it is
-one tap up. Home's own scanning block is suppressed while the panel is open, so
-exactly one surface reports a scan rather than leaving a Stop button covered by
-the sheet.
+The honest cost is one more step to try another type, and it is a deliberate
+trade: the flow is now *close the panel, then Analyze again*, where the panel
+used to rescan on the tap. What that buys is one place where the decision is
+made, and one value — the answer to the question — that the scan, the results and
+the next link all start from. With the question turned off, **Change type** beside
+the Analyze button reopens it, and that is where a different type is picked — not
+in the panel.
 
-The type chips are held closed while a download is running, and the panel says so:
-a rescan clears the rows, and those rows are where the per-file progress lives.
+What the panel does instead is hand the user back to the question. When a scan
+comes back empty because the walk found nothing of the type asked for, but *did*
+pass over other media, the empty state offers one **Change type** action, which
+reopens the Analyze dialog. It is an action, not a second list of types: the type
+is still chosen in exactly one place, and the panel holds no copy of that choice.
 
-An empty result distinguishes the two cases that need different fixes:
+That action is offered only for that one empty answer, gated by a tested rule
+(`anotherFileTypeMayHelp`). After a scan for `All`, every media type has already
+been looked for, so a *Change type* button there would invite a change and hand
+back the same empty list — the app suggesting a fix it knows cannot work. The same
+goes for a typed scan whose walk passed over no other media at all.
+
+The empty state carries a second action when a different fix applies: a walk cut
+short by the channel's scan limit offers **Search deeper**, which raises *that
+channel's* limit one step and scans again. The label names the limit it will give
+— *"Search deeper (1,000 files)"*, or *"Search the whole channel"* at the last
+step — so what the next scan may cost is on the button. It comes from one rule
+(`searchDeeperActionLabel`) shared with the results list, so the two surfaces
+cannot word or gate the same action differently; the rule returns null exactly
+when the ladder has run out, and that null is what hides the button.
+
+The panel is still gated on an explicit open flag rather than on there being rows
+to show, because a scan can be started from inside it: the **Scan again** action
+offered when Telegram had not finished loading a channel's older messages, and the
+**Change type** action above. Those rescans clear the rows they are replacing, so
+deriving the panel's existence from them would close it at the exact moment the
+user asked it to do something. While a rescan runs the panel says what it is
+scanning for and offers **Stop scanning**, and Home's own scanning block is
+suppressed while the panel is open, so exactly one surface reports a scan rather
+than leaving a Stop button covered by the sheet.
+
+An empty result distinguishes the cases that need different fixes:
 
 - the channel has **no files of the chosen type** — reported with the number of
   messages actually scanned (so a real result is distinguishable from a failed
   scan), plus how much *other* media the walk passed on the way, which is what
-  points a user at the right file type without re-scanning blindly; or
-- the channel **has** files of that type, but none match the active filter.
+  points a user at the right file type without re-scanning blindly;
+- the channel **has** files of that type, but none match the active filter; or
+- the walk was **cut short by the channel's scan limit**, which the empty card
+  says plainly and answers with **Search deeper** — an empty answer that is
+  actually a partial scan must never read as "the channel has none".
 
 The size line stays honest when Telegram has not reported a size for some
 files: it reads *"at least 2.5 GB (size not reported for 3 file(s))"* rather
@@ -634,11 +737,14 @@ History is walked newest-first, so results are ordered most-recent-first and
   the memory on a channel holding tens of thousands of files. When the cap is
   reached the UI says so explicitly — both on the results panel and in the
   empty state — so a truncated scan is never mistaken for a complete one.
-- **Range selection** in the download panel takes a first and last file number,
-  so 20 files out of 50,000 are picked by typing two numbers instead of
-  scrolling and ticking. **Newest 10 / 20 / 50 / 100** presets cover the usual
-  case in one tap (a preset larger than the list is disabled rather than
-  silently clamped, so the button never claims more than it does).
+- **Range selection** in the download panel is one combobox: **Newest 10 / 20 /
+  50 / 100 files** for the usual case in one tap, and **Custom range…** for a
+  first and last file number, so 20 files out of 50,000 are picked by typing two
+  numbers instead of scrolling and ticking. A preset larger than the list is
+  disabled rather than silently clamped, so an entry never claims more than it
+  does. The combobox shows the range currently in force, clamped onto the list on
+  screen — the same clamp the number fields pre-fill from, so what it says and
+  what it gives cannot disagree.
 - The range that was last applied is **remembered** and re-seeded on the next
   analysis, clamped to the new list so a range carried over from a larger
   channel can never come back invalid. Only a range that validated is stored,
@@ -651,15 +757,27 @@ resolved Telegram chat id — the only identifier that is stable across
 `t.me/name`, `t.me/c/...` and invite links, which all resolve to the same chat.
 Keying on the link text would remember one channel several times over.
 
-The app-wide values in Settings are *defaults* for channels with nothing saved,
-not global overrides. A channel gains its own entry the first time it is
-analyzed, and that entry follows the channel:
+The app-wide scan limit and the last applied range are *defaults* for channels
+with nothing saved, not global overrides. A channel gains its own entry the first
+time it is analyzed, and that entry follows the channel:
 
-- changing the Home filter, or applying a range, while a channel is loaded
-  writes to that channel rather than to every other one;
+- the type chosen in the analyze question, or a range applied while a channel is
+  loaded, is written to that channel rather than to every other one;
 - a scan cut short by its limit offers **Search deeper** in the results panel,
   which raises *that channel's* limit one step and analyzes again — so
   deepening one channel's search does not quietly change the others;
+- a channel's limit can also be **set from its own row** in Settings → Channels,
+  which is the only way in for a channel that has never been analyzed — the
+  panel's action exists only once a scan has been cut short. The dialog offers the
+  whole ladder rather than only the deeper steps: a control that could only go up
+  would leave a limit that is too large, or an "All" chosen by mistake, with no
+  way back except analyzing the channel again. A limit that is not one of the
+  steps — written by an older build, or by a release whose ladder has changed — is
+  offered alongside them (`scanLimitChoicesFor`), so the value in force can be
+  seen and kept instead of disappearing from the control meant to describe it, and
+  changing a limit leaves the channel's *last used* stamp alone so the row being
+  edited does not jump to the top of the list mid-tap. Re-choosing the value
+  already in force writes nothing at all, so it cannot reorder the list either;
 - Settings lists every remembered channel with what it holds, and can forget one
   or all of them.
 

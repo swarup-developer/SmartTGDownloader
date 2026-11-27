@@ -75,6 +75,27 @@ fun resolveChannelSettings(
 )
 
 /**
+ * This channel's settings with its scan limit changed, or null when [value] is
+ * already the limit in force.
+ *
+ * Null rather than an unchanged copy because there is then nothing to write:
+ * re-choosing the value in force must not touch the store at all.
+ *
+ * [updatedAtEpochMs] is carried over deliberately. It stamps when a channel was
+ * last *used*, and it is what orders the Channels list newest-first — so
+ * re-stamping it here would move the very row being edited to the top of that
+ * list, mid-interaction, pulling the control out from under the finger or the
+ * focus. Setting a limit is not a use of the channel.
+ */
+fun ChannelSettings.withScanLimit(value: Int): ChannelSettings? {
+    // Matches the store's read path, where a negative degrades to "All" rather
+    // than to a limit below any real one.
+    val limit = value.coerceAtLeast(0)
+    if (limit == scanLimit) return null
+    return copy(scanLimit = limit)
+}
+
+/**
  * Per-channel download preferences.
  *
  * The app-wide values in [AppPreferences] are the *defaults*; a channel only
@@ -105,6 +126,18 @@ class ChannelPreferenceStore(context: Context) {
         val next = _channels.value
             .filter { it.chatId != settings.chatId } + settings
         write(next)
+    }
+
+    /**
+     * Changes one channel's remembered scan limit.
+     *
+     * A no-op for a channel with no entry — there is nothing to edit — and a
+     * no-op when the limit is already in force, so re-choosing it does not rewrite
+     * the store.
+     */
+    fun setScanLimit(chatId: Long, limit: Int) {
+        val existing = get(chatId) ?: return
+        existing.withScanLimit(limit)?.let { save(it) }
     }
 
     fun forget(chatId: Long) {

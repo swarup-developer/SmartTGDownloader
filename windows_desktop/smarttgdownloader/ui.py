@@ -3,9 +3,11 @@ from .worker import TelegramWorker
 
 # --- Progress Dialog Class ---
 class DownloadProgressDialog(wx.Dialog):
-    def __init__(self, parent):
-        super().__init__(parent, title="Processing Downloads...", size=(500, 350))
+    def __init__(self, parent, mode="download"):
+        title = "Analyzing Link..." if mode == "scan" else "Processing Downloads..."
+        super().__init__(parent, title=title, size=(500, 350))
         self.parent = parent
+        self.mode = mode
         self.stop_requested = False
         self._last_announced_percent = -1  # Track for accessibility announcements
         
@@ -64,10 +66,29 @@ class DownloadProgressDialog(wx.Dialog):
         vbox.Add(btn_row, 0, wx.ALL|wx.CENTER, 5)
         
         panel.SetSizer(vbox)
+        self.panel = panel
+        self.set_mode(mode)
         self.CenterOnParent()
         
         # Announce dialog opened
-        AccessibilityHelper.announce(self, "Download started. Processing files.")
+        AccessibilityHelper.announce(
+            self,
+            "Analyzing Telegram link." if mode == "scan" else "Download started. Processing files."
+        )
+
+    def set_mode(self, mode):
+        self.mode = mode
+        is_scan = mode == "scan"
+        self.SetTitle("Analyzing Link..." if is_scan else "Processing Downloads...")
+        self.btn_stop.SetLabel("Stop Scan" if is_scan else "Stop Download")
+        self.btn_pause.Show(not is_scan)
+        self.btn_pause.Enable(not is_scan)
+        self.panel.Layout()
+
+    def set_status_text(self, text):
+        self.lbl_current.SetLabel(str(text))
+        if self.mode == "scan":
+            self.gauge.Pulse()
 
     def on_stop(self, event):
         self.stop_requested = True
@@ -432,6 +453,7 @@ class LoginPanel(wx.Panel):
         self.api_hash = None
         self.resend_cooldown_seconds = 45
         self.resend_seconds_remaining = 0
+        self._cooldown_active = False
 
         main = wx.BoxSizer(wx.VERTICAL)
         heading = wx.StaticText(self, label="Telegram Login")
@@ -576,8 +598,12 @@ class LoginPanel(wx.Panel):
         label = (account_label or "").strip() or "Account"
         self.lbl_account.SetLabel(f"Account: {label}")
 
-    def reset_for_new_session(self):
+    def stop_cooldown_timer(self):
+        self._cooldown_active = False
         self.resend_seconds_remaining = 0
+
+    def reset_for_new_session(self):
+        self.stop_cooldown_timer()
         self.txt_phone.SetValue("")
         self.txt_code.SetValue("")
         self.data = {}
@@ -753,12 +779,16 @@ class LoginPanel(wx.Panel):
         wx.CallLater(120, self.mainframe.txt_link.SetFocus)
 
     def _start_resend_cooldown(self):
+        self._cooldown_active = True
         self.resend_seconds_remaining = self.resend_cooldown_seconds
         self.btn_resend.Disable()
         self._tick_resend_cooldown()
 
     def _tick_resend_cooldown(self):
+        if not self._cooldown_active or not self.IsShown():
+            return
         if self.resend_seconds_remaining <= 0:
+            self._cooldown_active = False
             self.btn_resend.SetLabel("Resend OTP")
             self.btn_resend.Enable()
             AccessibilityHelper.announce(self, "Resend OTP is available now.")
@@ -796,7 +826,7 @@ class LoginPanel(wx.Panel):
 # --- Settings Dialog (Restored: Proxy Only) ---
 class SettingsDialog(wx.Dialog):
     def __init__(self, parent, worker):
-        super().__init__(parent, title="Configuration", size=(560, 520))
+        super().__init__(parent, title="Configuration", size=(560, 620))
         self.worker = worker
         self.cfg = load_settings()
         p = wx.Panel(self)
@@ -888,7 +918,60 @@ class SettingsDialog(wx.Dialog):
         )
         v.Add(transfer_sizer, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM | wx.EXPAND, 10)
 
+        analysis_box = wx.StaticBox(self.tab_general, label="Analysis & Default Filters")
+        analysis_sizer = wx.StaticBoxSizer(analysis_box, wx.VERTICAL)
+        self.chk_ask_filters = wx.CheckBox(
+            self.tab_general,
+            label="Ask which file types to include before analyzing"
+        )
+        self.chk_ask_filters.SetValue(bool(self.cfg.get('ask_before_analyzing', True)))
+        analysis_sizer.Add(self.chk_ask_filters, 0, wx.ALL, 8)
+
+        saved_filters = set(normalize_filter_selection(self.cfg.get('default_filters')))
+        filter_row = wx.BoxSizer(wx.HORIZONTAL)
+        self.filter_checks = {}
+        for cat in DOWNLOAD_CATEGORIES:
+            chk = wx.CheckBox(self.tab_general, label=cat)
+            chk.SetValue(cat in saved_filters)
+            chk.Bind(wx.EVT_CHECKBOX, lambda e, c=cat: self._on_filter_check(c))
+            self.filter_checks[cat] = chk
+            filter_row.Add(chk, 0, wx.RIGHT, 10)
+        analysis_sizer.Add(filter_row, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+        v.Add(analysis_sizer, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM | wx.EXPAND, 10)
+
+        self.btn_check_updates = wx.Button(self.tab_general, label="Check for Updates")
+        self.btn_check_updates.Bind(wx.EVT_BUTTON, self.on_check_updates)
+        v.Add(self.btn_check_updates, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
+
         self.tab_general.SetSizer(v)
+
+    def _on_filter_check(self, changed_cat):
+        if changed_cat == "All" and self.filter_checks["All"].GetValue():
+            for cat, chk in self.filter_checks.items():
+                if cat != "All":
+                    chk.SetValue(False)
+        elif changed_cat != "All" and self.filter_checks[changed_cat].GetValue():
+            self.filter_checks["All"].SetValue(False)
+
+    def on_check_updates(self, event):
+        self.btn_check_updates.Disable()
+        self.set_feedback("Checking for updates...")
+
+        async def _check():
+            res = await self.worker.check_for_updates()
+            wx.CallAfter(self._on_update_checked, res)
+
+        self.worker._run_task(_check())
+
+    def _on_update_checked(self, res):
+        if not self or not self.IsShown():
+            return
+        self.btn_check_updates.Enable()
+        if res and res.get("update"):
+            self.set_feedback(f"Update available: v{res['version']}")
+            wx.CallAfter(self.GetParent().show_update_prompt, res)
+        else:
+            self.set_feedback(f"You are on the latest version (v{CURRENT_VERSION}).")
 
     def on_notebook_nav(self, event):
         key = event.GetKeyCode()
@@ -915,24 +998,37 @@ class SettingsDialog(wx.Dialog):
         wx.CallAfter(self.GetParent().switch_account)
 
     def on_save(self, e):
+        proxy_enabled = self.chk_proxy.GetValue()
         host = self.txt_host.GetValue().strip()
-        if not host:
-            self.set_feedback("Proxy host is required.", is_error=True)
-            self.notebook.ChangeSelection(1)
-            wx.CallAfter(self.txt_host.SetFocus)
-            return
-
         port_text = self.txt_port.GetValue().strip()
-        if not port_text.isdigit():
-            self.set_feedback("Proxy port must be a number.", is_error=True)
+        if proxy_enabled:
+            if not host:
+                self.set_feedback("Proxy host is required.", is_error=True)
+                self.notebook.ChangeSelection(1)
+                wx.CallAfter(self.txt_host.SetFocus)
+                return
+
+            if not port_text.isdigit():
+                self.set_feedback("Proxy port must be a number.", is_error=True)
+                self.notebook.ChangeSelection(1)
+                wx.CallAfter(self.txt_port.SetFocus)
+                return
+            port = int(port_text)
+            if port < 1 or port > 65535:
+                self.set_feedback("Proxy port must be between 1 and 65535.", is_error=True)
+                self.notebook.ChangeSelection(1)
+                wx.CallAfter(self.txt_port.SetFocus)
+                return
+        else:
+            host = host or "127.0.0.1"
+            port = int(port_text) if port_text.isdigit() and 1 <= int(port_text) <= 65535 else 1080
+
+        selected_filters = [
+            cat for cat, chk in self.filter_checks.items() if chk.GetValue()
+        ]
+        if not selected_filters:
+            self.set_feedback("Select at least one default content filter.", is_error=True)
             self.notebook.ChangeSelection(1)
-            wx.CallAfter(self.txt_port.SetFocus)
-            return
-        port = int(port_text)
-        if port < 1 or port > 65535:
-            self.set_feedback("Proxy port must be between 1 and 65535.", is_error=True)
-            self.notebook.ChangeSelection(1)
-            wx.CallAfter(self.txt_port.SetFocus)
             return
 
         speed_text = self.txt_speed.GetValue().strip()
@@ -949,11 +1045,13 @@ class SettingsDialog(wx.Dialog):
             return
 
         data = {
-            'proxy_enabled': self.chk_proxy.GetValue(),
+            'proxy_enabled': proxy_enabled,
             'proxy_type': 'SOCKS5',
             'proxy_host': host,
             'proxy_port': port,
-            'speed_limit_kbps': speed_limit_kbps
+            'speed_limit_kbps': speed_limit_kbps,
+            'default_filters': normalize_filter_selection(selected_filters),
+            'ask_before_analyzing': bool(self.chk_ask_filters.GetValue()),
         }
         save_settings(data)
         self.worker.apply_transfer_settings()
@@ -990,11 +1088,11 @@ class UpdateAvailableDialog(wx.Dialog):
         )
         b_update.Bind(wx.EVT_BUTTON, lambda e: self.EndModal(wx.ID_YES))
         
-        b_exit = wx.Button(p, label="Exit")
+        b_exit = wx.Button(p, label="Later")
         AccessibilityHelper.set_accessible_properties(
             b_exit,
-            "Exit button",
-            "Exit application"
+            "Update later button",
+            "Close this dialog and continue using the app"
         )
         b_exit.Bind(wx.EVT_BUTTON, lambda e: self.EndModal(wx.ID_NO))
         
@@ -1086,13 +1184,24 @@ class MainFrame(wx.Frame):
                                    "Confirm Exit", wx.YES_NO | wx.ICON_QUESTION)
             result = dlg.ShowModal()
             dlg.Destroy()
-            if result == wx.ID_YES:
-                self.worker.stop_download()
-                self.Destroy()
-        else:
-            self.Destroy()
+            if result != wx.ID_YES:
+                return
+        self.login_panel.stop_cooldown_timer()
+        self.worker.stop_download()
+        try:
+            self.worker._run_task(self.worker.disconnect_client()).result(timeout=3)
+        except Exception:
+            pass
+        if getattr(self, "mutex", None) and WIN32_AVAILABLE:
+            try:
+                CloseHandle(self.mutex)
+            except Exception:
+                pass
+            self.mutex = None
+        self.Destroy()
 
     def on_login_success(self):
+        self.login_panel.stop_cooldown_timer()
         self.show_download()
         self.set_operation_mode("Ready", "Logged in successfully.")
         self.notify_user("Logged in successfully.", toast=True)
@@ -1329,16 +1438,26 @@ class MainFrame(wx.Frame):
 
     def update_progress(self, cmd, data, extra=0):
         if cmd == "START_DIALOG":
+            mode = data if data in ("scan", "download") else "download"
             self.is_downloading = True
+            self.btn_process.Disable()
             if not self.progress_dlg:
-                self.progress_dlg = DownloadProgressDialog(self)
+                self.progress_dlg = DownloadProgressDialog(self, mode=mode)
                 self.progress_dlg.Show()
+            else:
+                self.progress_dlg.set_mode(mode)
             if self.progress_dlg:
                 wx.CallAfter(self.progress_dlg.txt_log.SetFocus)
-            if self.current_mode not in ("Analyzing", "Downloading"):
+            if mode == "scan":
+                self.set_operation_mode("Analyzing", "Analyzing link")
+            elif self.current_mode not in ("Analyzing", "Downloading"):
                 self.set_operation_mode("Downloading", "Processing task")
+        elif cmd == "STATUS_TEXT":
+            if self.progress_dlg:
+                self.progress_dlg.set_status_text(data)
         elif cmd == "SCAN_DONE":
             self.is_downloading = False
+            self.on_text_change(None)
             if self.progress_dlg:
                 self.progress_dlg.Destroy()
                 self.progress_dlg = None
@@ -1359,6 +1478,7 @@ class MainFrame(wx.Frame):
             wx.CallLater(120, self.txt_link.SetFocus)
         elif cmd == "TASK_ABORTED":
             self.is_downloading = False
+            self.on_text_change(None)
             if self.progress_dlg:
                 self.progress_dlg.Destroy()
                 self.progress_dlg = None
@@ -1471,6 +1591,9 @@ class MainFrame(wx.Frame):
         self.download_panel.Layout()
 
     def on_process(self, e):
+        if self.is_downloading:
+            self.notify_user("An operation is already running.", is_error=True)
+            return
         link = self.txt_link.GetValue().strip()
         if not link:
             AccessibilityHelper.announce_error(self, "Telegram link is required")
@@ -1482,32 +1605,42 @@ class MainFrame(wx.Frame):
             self.notify_user("Please enter a valid Telegram link.", is_error=True)
             return
 
-        filter_options = ["All", "Audio", "Video", "Images", "Docs"]
-        d = wx.MultiChoiceDialog(
-            self,
-            "Select content types to include in scan results:",
-            "Content Filters",
-            filter_options
-        )
-        d.SetSelections([1, 2])
-        if d.ShowModal() == wx.ID_OK:
-            selections = [filter_options[i] for i in d.GetSelections()]
-            if not selections:
-                self.notify_user("Select at least one filter.", is_error=True)
+        cfg = load_settings()
+        saved_filters = normalize_filter_selection(cfg.get("default_filters"))
+        ask_before = bool(cfg.get("ask_before_analyzing", True))
+
+        if not ask_before:
+            selections = saved_filters
+        else:
+            filter_options = list(DOWNLOAD_CATEGORIES)
+            preselected = [i for i, opt in enumerate(filter_options) if opt in saved_filters] or [1, 2]
+            d = wx.MultiChoiceDialog(
+                self,
+                "Select content types to include in scan results:",
+                "Content Filters",
+                filter_options
+            )
+            d.SetSelections(preselected)
+            if d.ShowModal() != wx.ID_OK:
                 d.Destroy()
                 return
-            if "All" in selections:
-                selections = ["All"]
-            self.lbl_status.SetLabel("Analyzing link...")
-            self.set_operation_mode("Analyzing", "Analyzing link")
-            self.btn_open_folder.Hide()
-            self.download_panel.Layout()
-            # Mint a token that invalidates any previous in-flight scan and
-            # guarantees only this request can publish cached results.
-            scan_token = self.worker.next_scan_token()
-            self.worker._run_task(self.worker.scan_link(link, selections, scan_token))
-            wx.CallLater(120, self.txt_link.SetFocus)
-        d.Destroy()
+            raw_selections = [filter_options[i] for i in d.GetSelections()]
+            d.Destroy()
+            if not raw_selections:
+                self.notify_user("Select at least one filter.", is_error=True)
+                return
+            selections = normalize_filter_selection(raw_selections)
+            save_settings({"default_filters": selections})
+
+        self.lbl_status.SetLabel("Analyzing link...")
+        self.set_operation_mode("Analyzing", "Analyzing link")
+        self.btn_open_folder.Hide()
+        self.download_panel.Layout()
+        # Mint a token that invalidates any previous in-flight scan and
+        # guarantees only this request can publish cached results.
+        scan_token = self.worker.next_scan_token()
+        self.worker._run_task(self.worker.scan_link(link, selections, scan_token))
+        wx.CallLater(120, self.txt_link.SetFocus)
 
     async def check_update_task(self):
         res = await self.worker.check_for_updates()
@@ -1520,9 +1653,6 @@ class MainFrame(wx.Frame):
         d.Destroy()
         if ret == wx.ID_YES:
             self.worker._run_task(self.worker.perform_update(res['download_url']))
-        else:
-            import sys
-            sys.exit(0)
 
 def run_app():
     app = wx.App()

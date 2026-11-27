@@ -5,6 +5,8 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.swarupbaral.smarttgdownloader.AppContainer
 import com.swarupbaral.smarttgdownloader.data.AppPreferences
+import com.swarupbaral.smarttgdownloader.data.anotherFileTypeMayHelp
+import com.swarupbaral.smarttgdownloader.data.searchDeeperActionLabel
 import com.swarupbaral.smarttgdownloader.data.ChannelDefaults
 import com.swarupbaral.smarttgdownloader.data.ChannelSettings
 import com.swarupbaral.smarttgdownloader.data.DownloadManager
@@ -57,8 +59,31 @@ class DownloadViewModel : ViewModel() {
             get() = totalBytes > 0 && downloadedBytes >= totalBytes
     }
 
-    /** Why the last scan produced nothing to show, phrased for the user. */
-    data class EmptyResult(val title: String, val detail: String)
+    /**
+     * Why the last scan produced nothing to show, phrased for the user.
+     *
+     * [anotherTypeMayHelp] marks the one empty answer whose fix is a different
+     * file type: the walk went through the channel, found nothing of the type
+     * asked for, but passed over other media on the way. The results panel offers
+     * *Change type* for this case and no other, so it never suggests a change that
+     * could not find anything — see [anotherFileTypeMayHelp] for the rule.
+     */
+    data class EmptyResult(
+        val title: String,
+        val detail: String,
+        val anotherTypeMayHelp: Boolean = false,
+        /**
+         * Label for the action that raises this channel's scan limit, or null
+         * when the walk was not cut short.
+         *
+         * Carried on the answer itself because the advice and the control belong
+         * together: the detail above says *"the scan stopped at the ... limit ...
+         * use \"Search deeper\" to go further"*, and until this existed that
+         * sentence named a button the user could not find. The label comes from
+         * [searchDeeperActionLabel], the same one the results list uses.
+         */
+        val searchDeeperLabel: String? = null
+    )
 
     /**
      * Stage of the results flow: find out what is there, then choose how much
@@ -131,12 +156,13 @@ class DownloadViewModel : ViewModel() {
         /**
          * Whether the results panel is up.
          *
-         * An explicit flag rather than "there are results to show": the panel
-         * offers its own way to change the file type and scan again, and a
-         * rescan deliberately clears the old rows — old "Audio" rows say nothing
-         * about "Video". Deriving it from the rows would close the panel at the
-         * exact moment the user asked it to do something, dropping them back on
-         * the link field to watch a scan they started from inside the panel.
+         * An explicit flag rather than "there are results to show": a scan can be
+         * started from inside the panel — the *Scan again* action offered when
+         * Telegram had not finished loading a channel's older messages — and that
+         * rescan deliberately clears the rows it is replacing. Deriving the panel
+         * from the rows would close it at the exact moment the user asked it to do
+         * something, dropping them back on the link field to watch a scan they
+         * started from inside the panel.
          */
         val panelOpen: Boolean = false
     ) {
@@ -277,24 +303,68 @@ class DownloadViewModel : ViewModel() {
         DownloadManager.acknowledge()
     }
 
-    fun updateLink(value: String) {
-        _uiState.value = _uiState.value.copy(link = value)
+    /** Cancels an active download batch from the UI. */
+    fun cancelDownload(context: Context) {
+        DownloadManager.cancel(context.applicationContext)
     }
 
     /**
-     * Changes the active filter. Persists it, so the option list and the
-     * selection stay identical wherever the filter is edited (Settings or
-     * Home) — there is one filter, not one per screen.
+     * Returns to Step 1 (link input), preserving the current link for editing
+     * while clearing stale scan results and terminal run cards.
      */
-    fun setFilter(category: String) {
-        // With a channel loaded this is a per-channel choice; before any
-        // analysis it edits the app-wide default instead.
-        if (currentChatId == null) {
-            AppContainer.appPreferences.setDefaultCategory(category)
+    fun backToLinkEdit() {
+        if (_uiState.value.analyzing || _uiState.value.downloading) return
+        currentChatId = null
+        DownloadManager.acknowledge()
+        _uiState.value = _uiState.value.copy(
+            scanResult = null,
+            scannedFilter = null,
+            selected = emptySet(),
+            stage = SelectionStage.CHOOSE,
+            emptyResult = null,
+            errorMessage = null,
+            statusMessage = null,
+            panelOpen = false
+        )
+    }
+
+    /** Resets everything back to a fresh Step 1 for a brand new link. */
+    fun startNewLink() {
+        if (_uiState.value.analyzing || _uiState.value.downloading) return
+        currentChatId = null
+        DownloadManager.acknowledge()
+        _uiState.value = _uiState.value.copy(
+            link = "",
+            scanResult = null,
+            scannedFilter = null,
+            selected = emptySet(),
+            stage = SelectionStage.CHOOSE,
+            emptyResult = null,
+            errorMessage = null,
+            statusMessage = null,
+            panelOpen = false
+        )
+    }
+
+    fun updateLink(value: String) {
+        val prev = _uiState.value
+        val linkChanged = value.trim() != prev.link.trim()
+        if (linkChanged && !prev.analyzing && !prev.downloading) {
+            currentChatId = null
+            _uiState.value = prev.copy(
+                link = value,
+                scanResult = null,
+                scannedFilter = null,
+                selected = emptySet(),
+                stage = SelectionStage.CHOOSE,
+                emptyResult = null,
+                errorMessage = null,
+                statusMessage = null,
+                panelOpen = false
+            )
         } else {
-            rememberOnCurrentChannel { it.copy(filter = category) }
+            _uiState.value = prev.copy(link = value)
         }
-        applyFilter(category)
     }
 
     /**
@@ -411,7 +481,18 @@ class DownloadViewModel : ViewModel() {
         val remembered = rememberedAnalyzeCategory(category)
         AppContainer.appPreferences.setDefaultCategory(remembered)
         AppContainer.appPreferences.setAskBeforeAnalyzing(!dontAskAgain)
-        setFilter(remembered)
+        // Update UI filter for the upcoming scan without touching any previous
+        // channel's saved preference; applyChannelSettings() writes to the
+        // resolved channel once resolveSource(link) finishes.
+        val state = _uiState.value
+        _uiState.value = state.copy(
+            categoryFilter = remembered,
+            scanResult = null,
+            scannedFilter = null,
+            selected = emptySet(),
+            stage = SelectionStage.CHOOSE,
+            emptyResult = null
+        )
         analyze()
     }
 
@@ -582,7 +663,10 @@ class DownloadViewModel : ViewModel() {
         )
     }
 
-    /** "Select a range" — opens the picker without selecting anything yet. */
+    /**
+     * The combobox's "Custom range…" entry: opens the number fields without
+     * selecting anything yet.
+     */
     fun chooseRange() {
         _uiState.value = _uiState.value.copy(
             stage = SelectionStage.RANGE,
@@ -699,26 +783,6 @@ class DownloadViewModel : ViewModel() {
             stage = SelectionStage.CHOOSE,
             emptyResult = null
         )
-    }
-
-    /**
-     * Changes the type of the loaded scan and scans again, from inside the
-     * results panel.
-     *
-     * Deliberately not [analyzeWithFilter]: that one is the answer to the analyze
-     * question, and it writes the asking preference. A change made here is not an
-     * answer to that question, so it leaves it alone — otherwise changing the type
-     * in the panel would silently switch the question on or off.
-     *
-     * The type is still remembered: it becomes the app-wide default, so the next
-     * link the user pastes starts from what they chose here instead of going back
-     * to whatever the last dialog answer was.
-     */
-    fun rescanWithFilter(category: String) {
-        val remembered = rememberedAnalyzeCategory(category)
-        AppContainer.appPreferences.setDefaultCategory(remembered)
-        setFilter(remembered)
-        analyze()
     }
 
     /**
@@ -871,9 +935,16 @@ class DownloadViewModel : ViewModel() {
         // user to guess which file type to try next.
         val othersNote = if (!all && result.otherMediaCount > 0) {
             " It does contain about ${result.otherMediaCount} other media file(s), " +
-                "so try another file type."
+                "so choose another file type and analyze again."
         } else {
             ""
+        }
+        // Computed once, so both empty answers below carry the same action label
+        // for the same truncated scan.
+        val deeperLabel = if (result.limitReached) {
+            searchDeeperActionLabel(result.fileLimit)
+        } else {
+            null
         }
         val empty = when {
             result.files.isEmpty() -> EmptyResult(
@@ -887,12 +958,20 @@ class DownloadViewModel : ViewModel() {
                     )
                     append(othersNote)
                     append(limitNote)
-                }
+                },
+                // Set with the notes above, from the same inputs: the card says
+                // another type may find something exactly when the panel offers
+                // the action that changes it, and names a deeper search exactly
+                // when the panel offers that too — so neither sentence can arrive
+                // without its control.
+                anotherTypeMayHelp = anotherFileTypeMayHelp(filter, result.otherMediaCount),
+                searchDeeperLabel = deeperLabel
             )
             state.visibleFiles.isEmpty() -> EmptyResult(
                 title = "No $filter files found",
                 detail = "This link has ${result.files.size} downloadable file(s) from the " +
-                    "loaded scan, but none are in the \"$filter\" filter." + limitNote
+                    "loaded scan, but none are in the \"$filter\" filter." + limitNote,
+                searchDeeperLabel = deeperLabel
             )
             else -> null
         }

@@ -35,8 +35,37 @@ from telethon import TelegramClient, events, errors, types
 from telethon.tl.functions.messages import ImportChatInviteRequest, CheckChatInviteRequest
 from cryptography.fernet import Fernet
 
-CURRENT_VERSION = "8.8.0"
+CURRENT_VERSION = "8.9.0"
 DOWNLOAD_BATCH_SIZE = 4
+DOWNLOAD_CATEGORIES = ("All", "Audio", "Video", "Images", "Docs")
+WINDOWS_RESERVED_NAMES = {
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
+}
+
+
+def sanitize_folder_name(name: str, fallback: str = "TelegramContent") -> str:
+    """Make a channel title safe as a single Windows directory name."""
+    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", str(name or "")).strip().strip(".")
+    if not cleaned or cleaned.upper() in WINDOWS_RESERVED_NAMES:
+        return fallback
+    if len(cleaned) > 120:
+        cleaned = cleaned[:120].strip().strip(".")
+    return cleaned or fallback
+
+
+def normalize_filter_selection(filters) -> list[str]:
+    """Validate and normalize a filter list against DOWNLOAD_CATEGORIES."""
+    if not isinstance(filters, (list, tuple, set)):
+        return ["Audio", "Video"]
+    valid = [str(f).strip() for f in filters if str(f).strip() in DOWNLOAD_CATEGORIES]
+    if not valid:
+        return ["Audio", "Video"]
+    if "All" in valid:
+        return ["All"]
+    # Deduplicate while preserving canonical order
+    return [cat for cat in DOWNLOAD_CATEGORIES if cat in valid]
 
 # --- Global Exception Handler ---
 def log_crash(exctype, value, tb):
@@ -218,11 +247,16 @@ def load_settings() -> dict:
         'proxy_host': '127.0.0.1', 
         'proxy_port': 1080,
         'speed_limit_kbps': 0,
+        'default_filters': ['Audio', 'Video'],
+        'ask_before_analyzing': True,
     }
     if not SETTINGS_FILE.exists(): return defaults
     try:
         saved = json.loads(SETTINGS_FILE.read_text(encoding='utf-8'))
-        defaults.update(saved)
+        if isinstance(saved, dict):
+            defaults.update(saved)
+        defaults['default_filters'] = normalize_filter_selection(defaults.get('default_filters'))
+        defaults['ask_before_analyzing'] = bool(defaults.get('ask_before_analyzing', True))
         return defaults
     except: return defaults
 

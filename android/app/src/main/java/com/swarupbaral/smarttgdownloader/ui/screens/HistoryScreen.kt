@@ -27,6 +27,7 @@ import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.FolderZip
+import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -234,6 +235,7 @@ class HistoryViewModel : ViewModel() {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HistoryScreen(
+    onOpenMenu: () -> Unit,
     viewModel: HistoryViewModel = viewModel()
 ) {
     val history by viewModel.history.collectAsState()
@@ -275,8 +277,14 @@ fun HistoryScreen(
                 .padding(vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
+            IconButton(onClick = onOpenMenu) {
+                Icon(Icons.Filled.Menu, contentDescription = "Open menu")
+            }
+            Spacer(Modifier.width(4.dp))
             Text(
-                "Download history",
+                // "History", the same word the tab and the menu use. The screen
+                // said "Download history" while both of those said "History".
+                "History",
                 style = MaterialTheme.typography.titleLarge,
                 modifier = Modifier
                     .weight(1f)
@@ -292,10 +300,15 @@ fun HistoryScreen(
         if (allEntries.isNotEmpty()) {
             OutlinedButton(
                 onClick = { openFolder(null) },
-                modifier = Modifier.semantics {
-                    contentDescription =
-                        "Open Downloads folder, ${DownloadsStore.displayPath()}"
-                }
+                modifier = Modifier
+                    // Full width, like every other action button in the app: an
+                    // action that wraps its own text is the odd one out, and a
+                    // wider target is easier to hit either way.
+                    .fillMaxWidth()
+                    .semantics {
+                        contentDescription =
+                            "Open Downloads folder, ${DownloadsStore.displayPath()}"
+                    }
             ) {
                 Text("Open Downloads folder")
             }

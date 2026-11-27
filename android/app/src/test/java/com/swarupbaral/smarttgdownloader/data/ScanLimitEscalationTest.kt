@@ -128,4 +128,73 @@ class ScanLimitEscalationTest {
             AppPreferences.SCAN_LIMIT_OPTIONS.filter { it > 0 }
         )
     }
+
+    @Test
+    fun `the deeper action names the limit it will give, not the one in force`() {
+        // The number in the label is the promise the button makes. Naming the
+        // limit already in force would describe what the user has and say nothing
+        // about what pressing it buys.
+        assertEquals("Search deeper (500 files)", searchDeeperActionLabel(100))
+        assertEquals("Search deeper (1,000 files)", searchDeeperActionLabel(500))
+        assertEquals("Search deeper (5,000 files)", searchDeeperActionLabel(1_000))
+    }
+
+    @Test
+    fun `the last step warns that it is the unbounded one`() {
+        // There is no number to promise once the limit is gone, and "Search the
+        // whole channel" is the sentence that says so. A label reading
+        // "Search deeper (0 files)" would read as a downgrade.
+        assertEquals("Search the whole channel", searchDeeperActionLabel(5_000))
+        assertEquals("Search the whole channel", searchDeeperActionLabel(50_000))
+    }
+
+    @Test
+    fun `an unlimited scan has no deeper action at all`() {
+        // Null is what hides the button, on both surfaces. A label here would
+        // offer to search deeper into a scan that already read the whole channel.
+        assertNull(searchDeeperActionLabel(0))
+        assertNull(searchDeeperActionLabel(-5))
+    }
+
+    @Test
+    fun `the action appears exactly when there is a step left to take`() {
+        // The button and the ladder must agree: an action shown where the ladder
+        // has run out would silently re-select the current limit and rescan the
+        // same depth, which looks like it worked.
+        val probes = AppPreferences.SCAN_LIMIT_OPTIONS + listOf(-1, 101, 250, 4_999, 50_000)
+        for (current in probes) {
+            assertEquals(
+                "action presence for $current disagrees with the ladder",
+                AppPreferences.nextScanLimit(current) != null,
+                searchDeeperActionLabel(current) != null
+            )
+        }
+    }
+
+    @Test
+    fun `the label never repeats the limit already in force`() {
+        for (current in AppPreferences.SCAN_LIMIT_OPTIONS + listOf(250, 501, 4_999)) {
+            val label = searchDeeperActionLabel(current) ?: continue
+            val next = AppPreferences.nextScanLimit(current)
+                ?: throw AssertionError("label for $current without a next step")
+            if (next > 0) {
+                // A numbered step must promise the number it will give...
+                assertTrue(
+                    "label for $current (\"$label\") does not name the next limit",
+                    label.contains(AppPreferences.scanLimitLabel(next))
+                )
+            } else {
+                // ...and the last step, which has no number to give, must not
+                // borrow one. "Search deeper (All files)" would be nonsense.
+                assertEquals("Search the whole channel", label)
+            }
+            if (current > 0) {
+                assertNotEquals(
+                    "label for $current (\"$label\") names the limit in force",
+                    "Search deeper (${AppPreferences.scanLimitLabel(current)} files)",
+                    label
+                )
+            }
+        }
+    }
 }

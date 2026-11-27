@@ -41,19 +41,17 @@ jobs:
           .\build.bat
         shell: cmd
 
+      - name: Extract Release Notes
+        shell: bash
+        run: |
+          python .github/workflows/extract_changelog.py ${{ env.VERSION }}
+
       - name: Create and Upload GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ env.VERSION }}-windows
           name: SmartTG Downloader Windows v${{ env.VERSION }}
-          body: |
-            ## SmartTG Downloader Windows Release v${{ env.VERSION }}
-            
-            This is an automated release of the Windows PC desktop client.
-            
-            ### Installation Instructions
-            1. Download `SmartTGDownloader.exe` below.
-            2. Run the executable on your Windows PC.
+          body_path: release_notes.txt
           files: windows_desktop/dist/SmartTGDownloader.exe
           draft: false
           prerelease: false

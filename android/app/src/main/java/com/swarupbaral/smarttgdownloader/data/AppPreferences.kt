@@ -304,8 +304,9 @@ class AppPreferences(context: Context) {
         val SCAN_LIMIT_OPTIONS = listOf(100, 500, 1_000, 5_000, 0)
 
         /**
-         * One-tap presets for the range picker, in the order shown. Results are
-         * newest-first, so these all mean "the N most recent files".
+         * The range combobox's preset entries, in the order shown. Results are
+         * newest-first, so these all mean "the N most recent files". An entry
+         * larger than the list on screen is disabled rather than clamped.
          */
         val RANGE_PRESETS = listOf(10, 20, 50, 100)
 
@@ -343,3 +344,107 @@ class AppPreferences(context: Context) {
 fun rememberedAnalyzeCategory(saved: String?): String =
     saved?.trim()?.takeIf { it in AppPreferences.DOWNLOAD_CATEGORIES }
         ?: AppPreferences.CATEGORY_ALL
+
+/** What the download panel's range combobox says before a range applies. */
+const val RANGE_CHOICE_PROMPT = "Choose a range…"
+
+/**
+ * The range combobox's current value, in words.
+ *
+ * The control shows the *last applied* range as its state, and that range can
+ * outlive the list it was chosen from. So it is clamped onto the current list
+ * exactly as the custom fields are — which is the point: what the combobox says
+ * and what those fields hold must never disagree, or the user would be shown one
+ * range and given another.
+ *
+ * [SavedRange.to] of 0 is the sentinel for "no range applied", not a stored
+ * number, so it reads as unset. An empty list does too: there is nothing to have
+ * a range of.
+ *
+ * "Newest N files" is deliberately not limited to the preset numbers. A preset
+ * of 100 clamped onto a 30-file list still is the newest 30, and saying so is
+ * truer than "Files 1 to 30" — which would read as a custom range nobody typed.
+ * Singular phrasing is handled for the same reason it is everywhere else: "Newest
+ * 1 files" understates the care taken over the rest of the screen.
+ */
+fun rangeChoiceLabel(saved: SavedRange, totalFiles: Int): String {
+    if (totalFiles <= 0) return RANGE_CHOICE_PROMPT
+    if (saved.to <= 0) return RANGE_CHOICE_PROMPT
+    val seed = saved.seededFor(totalFiles)
+    return when {
+        seed.from <= 1 && seed.to == 1 -> "Newest 1 file"
+        seed.from <= 1 -> "Newest ${seed.to} files"
+        seed.from == seed.to -> "File ${seed.from}"
+        else -> "Files ${seed.from} to ${seed.to}"
+    }
+}
+
+/**
+ * Whether asking for a different file type could turn up anything at all.
+ *
+ * An empty scan is answered differently depending on *why* it is empty, and only
+ * one of those answers is a type change. When the user asked for
+ * [AppPreferences.CATEGORY_ALL], the walk already looked for every media type, so
+ * there is no other type to offer — a change would be a suggestion that cannot
+ * find anything, and offering it would blame the wrong thing. And when the walk
+ * passed over no other media on its way through the channel, the channel has
+ * nothing of any type, so it amounts to the same thing.
+ *
+ * This gates the results panel's *Change type* action, which is why it lives on
+ * its own: the case it rules out — offering a type change after an `All` scan —
+ * reads perfectly plausible and is exactly wrong.
+ */
+fun anotherFileTypeMayHelp(filter: String, otherMediaCount: Int): Boolean =
+    filter != AppPreferences.CATEGORY_ALL && otherMediaCount > 0
+
+/**
+ * What the action that raises a truncated scan's limit says, or null when there
+ * is no further step to take.
+ *
+ * The label names the limit the user will get, not the one they are on, because
+ * that is the number the decision is about — "Search deeper (1,000 files)" says
+ * what the next scan may cost in time, where "Search deeper" alone says nothing.
+ * The last step is phrased differently on purpose: there is no number to give, and
+ * "Search the whole channel" warns that it is the unbounded one.
+ *
+ * One function, used by both the results list and the empty state. When only the
+ * list offered it, the empty answer's own advice ("use \"Search deeper\" to go
+ * further") pointed at a control that was not on the screen.
+ */
+fun searchDeeperActionLabel(currentLimit: Int): String? {
+    val next = AppPreferences.nextScanLimit(currentLimit) ?: return null
+    return if (next <= 0) "Search the whole channel"
+    else "Search deeper (${AppPreferences.scanLimitLabel(next)} files)"
+}
+
+/**
+ * How one scan-limit choice reads: "500 files" / "All files".
+ *
+ * Shared by both controls that offer the ladder — the app-wide default in
+ * Settings → Analysis and a single channel's own limit in Settings → Channels —
+ * because they are the same number and sit one section apart. Two spellings of
+ * "500" on one screen is a reader wondering whether they are the same thing.
+ */
+fun scanLimitChoiceLabel(value: Int): String =
+    if (value <= 0) "All files" else "${AppPreferences.scanLimitLabel(value)} files"
+
+/**
+ * The scan limits to offer for a channel whose limit is [current]: the configured
+ * ladder, with [current] added to it when that value is not on the ladder.
+ *
+ * A channel can hold a value that is not one of the steps — one written by an
+ * older build, or by a release whose ladder has since changed. Offering the ladder
+ * alone would then show no chosen entry for a limit the row above states plainly,
+ * and the value in force would be the one thing the control could not describe.
+ * Adding it means the current limit can be seen, kept, or moved on from.
+ *
+ * Ordering is the ladder's: numbered steps ascending, then 0 ("All") last.
+ */
+fun scanLimitChoicesFor(current: Int): List<Int> {
+    // 0 and below is the "All" step, so a hand-edited negative cannot invent an
+    // entry beside it.
+    val existing = if (current <= 0) 0 else current
+    if (existing in AppPreferences.SCAN_LIMIT_OPTIONS) return AppPreferences.SCAN_LIMIT_OPTIONS
+    val numbered = AppPreferences.SCAN_LIMIT_OPTIONS.filter { it > 0 }
+    return (numbered + existing).sorted() + 0
+}

@@ -24,7 +24,7 @@ def main():
         header = parts[i].strip()
         # Look for "Version: <version>" in the header
         # Since header might contain "Version: 1.0.2 / 8.7.1" or "Version: 1.0.1"
-        if f"Version: {version}" in header:
+        if re.search(rf"Version:\s*[^\n]*\b{re.escape(version)}\b", header):
             if i + 1 < len(parts):
                 body = parts[i+1].strip()
                 release_body = f"{header}\n\n{body}"

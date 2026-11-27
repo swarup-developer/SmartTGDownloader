@@ -26,16 +26,19 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.SearchOff
-import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
+import androidx.compose.material3.ExposedDropdownMenuAnchorType
+import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -66,12 +69,15 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.error
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.paneTitle
 import androidx.compose.ui.semantics.progressBarRangeInfo
 import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -80,11 +86,13 @@ import com.swarupbaral.smarttgdownloader.data.DownloadManager
 import com.swarupbaral.smarttgdownloader.data.DownloadsStore
 import com.swarupbaral.smarttgdownloader.data.SavedRange
 import com.swarupbaral.smarttgdownloader.data.TelegramRepository
+import com.swarupbaral.smarttgdownloader.data.rangeChoiceLabel
+import com.swarupbaral.smarttgdownloader.data.searchDeeperActionLabel
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HomeScreen(
-    onOpenSettings: () -> Unit,
+    onOpenMenu: () -> Unit,
     viewModel: DownloadViewModel = viewModel()
 ) {
     val state by viewModel.uiState.collectAsState()
@@ -122,6 +130,7 @@ fun HomeScreen(
 
     val startDownload = { requireNotificationPermission { viewModel.startDownload(context) } }
     val startZip = { requireNotificationPermission { viewModel.startZip(context) } }
+    val cancelDownload = { viewModel.cancelDownload(context) }
 
     // Keep last-known per-file progress while the results sheet is open.
     val fileProgress = state.fileProgress
@@ -158,118 +167,135 @@ fun HomeScreen(
         modifier = Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
-            .padding(24.dp)
+            // The same content margin History and Settings use. These screens had
+            // 24dp and 16dp for the same kind of content, which reads as one of
+            // them being wrong rather than as a deliberate difference.
+            .padding(horizontal = 16.dp)
+            .padding(top = 12.dp, bottom = 24.dp)
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
+            // The menu is the way to everything in the app now, so it leads the
+            // screen where a settings shortcut used to sit on the far right —
+            // the same corner a back button occupies everywhere else.
+            IconButton(onClick = onOpenMenu) {
+                Icon(Icons.Filled.Menu, contentDescription = "Open menu")
+            }
+            Spacer(Modifier.width(4.dp))
             Text(
-                "TG Downloader",
-                style = MaterialTheme.typography.headlineMedium,
+                // The app's full name, as the intro screen, the menu and the
+                // about line all give it. This screen used to shorten it.
+                "Smart TG Downloader",
+                style = MaterialTheme.typography.titleLarge,
                 modifier = Modifier
                     .weight(1f)
                     .semantics { heading() }
             )
-            IconButton(onClick = onOpenSettings) {
-                Icon(Icons.Filled.Settings, contentDescription = "Settings")
-            }
         }
 
-        Spacer(Modifier.height(20.dp))
-        StepHeading(1, "Paste the Telegram link")
-        Spacer(Modifier.height(8.dp))
-        OutlinedTextField(
-            value = state.link,
-            onValueChange = viewModel::updateLink,
-            placeholder = { Text("t.me/channel/123") },
-            singleLine = true,
-            modifier = Modifier
-                .fillMaxWidth()
-                .semantics { contentDescription = "Telegram link input field" }
-        )
+        val inProgressOrDone = state.analyzing ||
+            resultsSheetOpen ||
+            state.emptyResult != null ||
+            state.downloading ||
+            state.runState.isTerminal
 
-        // Step 2 is the analyze action itself. The file type is asked for in a
-        // dialog when it is pressed, not in chips above the button: the scan
-        // collects one type, so the choice has to be made before it starts, and
-        // the press is the moment the user is thinking about it. Once the user
-        // answers "don't ask again", the press scans with the remembered type
-        // instead — and the step says so, with the way to change it next to it.
-        if (linkEntered) {
-            Spacer(Modifier.height(24.dp))
-            StepHeading(2, "Analyze the link")
-            Spacer(Modifier.height(2.dp))
-            // A live region, so the step that just appeared below the field is
-            // announced instead of silently arriving somewhere off-screen. It
-            // states what Analyze will do *this* time: with the question turned
-            // off it scans straight away, and a button that started a scan with
-            // a type nobody mentioned would be a surprise.
-            Text(
-                if (state.askBeforeAnalyzing) {
-                    "Analyze asks what you want to download — Audio, Video, Images, " +
-                        "Docs or All. It looks for that one type, and All takes every " +
-                        "file in the link."
-                } else {
-                    "Analyze looks for ${state.categoryFilter} files without asking, " +
-                        "because you turned the question off. Change type opens it " +
-                        "once more."
-                },
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
-                modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }
-            )
+        if (!inProgressOrDone) {
+            Spacer(Modifier.height(20.dp))
+            StepHeading(1, "Paste the Telegram link")
             Spacer(Modifier.height(8.dp))
-            Button(
-                // The question is asked only when it is still wanted; otherwise
-                // the remembered type is used and the scan starts on the press.
-                onClick = {
-                    if (state.askBeforeAnalyzing) showFilterDialog = true
-                    else viewModel.analyzeWithoutAsking()
-                },
-                enabled = !state.analyzing,
+            OutlinedTextField(
+                value = state.link,
+                onValueChange = viewModel::updateLink,
+                placeholder = { Text("t.me/channel/123") },
+                singleLine = true,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .semantics {
-                        // Spoken, because with the question off the press starts
-                        // a scan of a type that is not otherwise on screen.
-                        contentDescription = if (state.askBeforeAnalyzing) {
-                            "Analyze link"
-                        } else {
-                            "Analyze the link for ${state.categoryFilter} files, " +
-                                "without asking which type"
+                    .semantics { contentDescription = "Telegram link input field" }
+            )
+
+            // Step 2 appears only once a link is typed, and disappears together
+            // with Step 1 once analysis/results/download take over.
+            if (linkEntered) {
+                Spacer(Modifier.height(24.dp))
+                StepHeading(2, "Analyze the link")
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    if (state.askBeforeAnalyzing) {
+                        "Analyze asks what you want to download — Audio, Video, Images, " +
+                            "Docs or All."
+                    } else {
+                        "Analyze looks for ${state.categoryFilter} files automatically. " +
+                            "You can change this in Settings or below."
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                    modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }
+                )
+                Spacer(Modifier.height(8.dp))
+                Button(
+                    onClick = {
+                        if (state.askBeforeAnalyzing) showFilterDialog = true
+                        else viewModel.analyzeWithoutAsking()
+                    },
+                    enabled = !state.analyzing,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .semantics {
+                            contentDescription = if (state.askBeforeAnalyzing) {
+                                "Analyze link"
+                            } else {
+                                "Analyze the link for ${state.categoryFilter} files, " +
+                                    "without asking which type"
+                            }
                         }
-                    }
-            ) {
-                Text(if (state.analyzing) "Analyzing…" else "Analyze link")
-            }
-            // The way back is here as well as in Settings: with the question
-            // off, this is the only place on Home where the type can be chosen
-            // before a scan, and sending someone into Settings mid-task to fix a
-            // choice they are about to make is a poor trade.
-            if (!state.askBeforeAnalyzing) {
-                Spacer(Modifier.height(4.dp))
-                TextButton(
-                    onClick = { showFilterDialog = true },
-                    modifier = Modifier.semantics {
-                        contentDescription =
-                            "Change type, currently ${state.categoryFilter}, and choose " +
-                                "whether the question is asked again"
-                    }
                 ) {
-                    Text("Change type")
+                    Text("Analyze link")
+                }
+                if (!state.askBeforeAnalyzing) {
+                    Spacer(Modifier.height(4.dp))
+                    TextButton(
+                        onClick = { showFilterDialog = true },
+                        modifier = Modifier.semantics {
+                            contentDescription =
+                                "Change type, currently ${state.categoryFilter}, and choose " +
+                                    "whether the question is asked again"
+                        }
+                    ) {
+                        Text("Change type")
+                    }
+                }
+            } else {
+                Spacer(Modifier.height(20.dp))
+                Text(
+                    "Files are saved to Download/${DownloadsStore.ROOT}/<channel>/ — one folder " +
+                        "per channel. No storage permission is needed, and downloads keep running " +
+                        "if you leave the app.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                )
+            }
+        } else {
+            Spacer(Modifier.height(16.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    state.scanResult?.sourceTitle?.takeIf { it.isNotBlank() } ?: state.link,
+                    style = MaterialTheme.typography.titleSmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                if (!state.analyzing && !state.downloading) {
+                    TextButton(onClick = viewModel::backToLinkEdit) {
+                        Text("Change link")
+                    }
                 }
             }
         }
-
-        Spacer(Modifier.height(20.dp))
-        Text(
-            "Files are saved to Download/${DownloadsStore.ROOT}/<channel>/ — one folder per " +
-                "channel. No storage permission is needed, and downloads keep running if you " +
-                "leave the app.",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-        )
 
         state.statusMessage?.let {
             Spacer(Modifier.height(12.dp))
@@ -290,14 +316,23 @@ fun HomeScreen(
                 }
             )
         }
-        state.progressText?.let {
+        if (state.downloading && !resultsSheetOpen) {
             Spacer(Modifier.height(12.dp))
             LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-            Spacer(Modifier.height(6.dp))
-            Text(
-                it,
-                modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }
-            )
+            state.progressText?.let {
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    it,
+                    modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+            OutlinedButton(
+                onClick = cancelDownload,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("Cancel download")
+            }
         }
 
         // The batch is over: where the files went, and a way to go and look. It
@@ -313,14 +348,48 @@ fun HomeScreen(
                 onOpenFolder = openFolder,
                 onDismiss = viewModel::acknowledgeRun
             )
+            Spacer(Modifier.height(8.dp))
+            Button(
+                onClick = viewModel::startNewLink,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("Download another link")
+            }
         }
 
         // The explicit "nothing here" answer. Rendered inline rather than in
         // the results sheet, because an empty sheet is easy to mistake for a
         // failed scan.
-        state.emptyResult?.let { empty ->
-            Spacer(Modifier.height(20.dp))
-            EmptyResultCard(empty)
+        //
+        // Hidden while the sheet is open, which matters twice over: this card is a
+        // live region, so the sheet's own copy would have the answer announced
+        // twice, and any action under it would exist twice as well — once behind a
+        // modal sheet the user cannot reach.
+        if (!resultsSheetOpen) {
+            state.emptyResult?.let { empty ->
+                Spacer(Modifier.height(20.dp))
+                EmptyResultCard(empty)
+                // The advice inside the card above says to search deeper when the
+                // walk was cut short, so the control it names is here under it.
+                empty.searchDeeperLabel?.let { label ->
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedButton(
+                        onClick = viewModel::searchDeeper,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(label)
+                    }
+                }
+                if (empty.anotherTypeMayHelp) {
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedButton(
+                        onClick = { showFilterDialog = true },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Change type")
+                    }
+                }
+            }
         }
 
         // Failures are reported on the screen itself, not only inside the
@@ -358,14 +427,10 @@ fun HomeScreen(
     val visibleFiles = state.visibleFiles
     if (resultsSheetOpen) {
         ModalBottomSheet(onDismissRequest = viewModel::dismissResults) {
-            // The type control sits outside every state below, so it stays
-            // reachable while a scan runs and when one comes back empty — which
-            // is exactly when the user wants to try another type.
-            ResultsPanelTypeControl(
-                filter = state.categoryFilter,
-                downloadRunning = state.downloading,
-                onChoose = viewModel::rescanWithFilter
-            )
+            // No file-type control in here: the type is settled in the question
+            // Analyze asks, and offering it a second time from the panel made the
+            // same decision reachable from two places that could disagree about
+            // what the scan had looked for.
             when {
                 state.analyzing -> ResultsPanelScanning(
                     filter = state.categoryFilter,
@@ -376,6 +441,11 @@ fun HomeScreen(
                 result == null || visibleFiles.isEmpty() -> ResultsPanelNothing(
                     empty = state.emptyResult,
                     statusMessage = state.statusMessage,
+                    // Reopens the Analyze question rather than showing a list of
+                    // types in here: the type is chosen in one place, and this is
+                    // the panel handing the user back to it.
+                    onChangeType = { showFilterDialog = true },
+                    onSearchDeeper = viewModel::searchDeeper,
                     onRescan = viewModel::analyze,
                     onClose = viewModel::dismissResults
                 )
@@ -412,7 +482,9 @@ fun HomeScreen(
                     keepZipFiles = state.keepZipFiles,
                     onKeepZipFilesChange = viewModel::setKeepZipFiles,
                     onDownload = startDownload,
-                    onDownloadZip = startZip
+                    onDownloadZip = startZip,
+                    onCancelDownload = cancelDownload,
+                    onStartNewLink = viewModel::startNewLink
                 )
             }
         }
@@ -665,80 +737,12 @@ private fun FailedDownloadsCard(
 }
 
 /**
- * The file type, offered from inside the results panel.
+ * The panel while a scan it started is running.
  *
- * The scan collects exactly one type, so the type is the scan's own parameter —
- * and it is the answer most often revised once the count is in ("no Audio?" →
- * try Video). Sending the user back to the link field to change their mind meant
- * walking away from the results they were reacting to, then looking at them again
- * through a sheet that had just closed. Here the count and the control that
- * changes it are on the same screen.
- *
- * Choosing a type scans straight away rather than waiting for a second press:
- * the user is looking at a scan's output and asking for that output to be
- * different, which is one intention, not two. Tapping the type that is already
- * selected does nothing, since it would ask for the list already on screen.
- *
- * The chips are held closed while a download is running: a rescan clears the
- * rows, and those rows are where the per-file progress is. The download itself
- * would survive, but the user would lose sight of it — so the note says why
- * rather than leaving a control that has silently gone dead.
- */
-@Composable
-private fun ResultsPanelTypeControl(
-    filter: String,
-    downloadRunning: Boolean,
-    onChoose: (String) -> Unit
-) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp)
-    ) {
-        Text(
-            "File type",
-            style = MaterialTheme.typography.titleSmall,
-            modifier = Modifier.semantics { heading() }
-        )
-        Spacer(Modifier.height(2.dp))
-        Text(
-            if (downloadRunning) {
-                "A download is running. The file type can be changed when it finishes."
-            } else {
-                "One type per scan. Choosing one scans this channel again for it."
-            },
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
-        )
-        Spacer(Modifier.height(8.dp))
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            // Exactly the Settings set, as everywhere else in the app.
-            for (category in AppPreferences.DOWNLOAD_CATEGORIES) {
-                val isSelected = filter == category
-                FilterChip(
-                    selected = isSelected,
-                    enabled = !downloadRunning,
-                    onClick = { if (!isSelected) onChoose(category) },
-                    label = { Text(category) },
-                    modifier = Modifier.semantics {
-                        role = Role.RadioButton
-                        stateDescription = if (isSelected) "Selected" else "Not selected"
-                    }
-                )
-            }
-        }
-        Spacer(Modifier.height(4.dp))
-    }
-}
-
-/**
- * The panel while it is scanning again, after the type was changed from inside
- * it.
+ * Reachable when a scan was cut short because Telegram had not finished loading
+ * the channel's older messages: the *Scan again* action sits in the panel, so the
+ * panel has to report the scan it just began. It is not a type change — the type
+ * lives in the Analyze question, and the panel never scans for a different one.
  *
  * The type being scanned is stated in a live region, because the rows the user
  * was looking at have just been cleared and something has to explain the gap.
@@ -791,14 +795,20 @@ private fun ResultsPanelScanning(
  * The panel when there is nothing to list: a scan that found no files of the
  * chosen type, or one that was stopped.
  *
- * It stays open rather than collapsing, because the type control above is the
- * answer to both — "No Video files found" is a statement about one type, and the
- * way to act on it is one tap up.
+ * It stays open rather than collapsing, so the answer is in front of the user
+ * instead of back on the Home screen behind a dismissed sheet: *Search deeper*
+ * when the walk was cut short by the channel's limit, *Change type* when it passed
+ * over other media, *Scan again* for a walk that was unfinished or stopped, and
+ * *Close results* to go back. Which of the first two is offered comes from the
+ * empty result itself — see [DownloadViewModel.EmptyResult] — so the panel never
+ * proposes a fix that cannot help, and never names one the card has not raised.
  */
 @Composable
 private fun ResultsPanelNothing(
     empty: DownloadViewModel.EmptyResult?,
     statusMessage: String?,
+    onChangeType: () -> Unit,
+    onSearchDeeper: () -> Unit,
     onRescan: () -> Unit,
     onClose: () -> Unit
 ) {
@@ -820,6 +830,40 @@ private fun ResultsPanelNothing(
             )
         }
         Spacer(Modifier.height(12.dp))
+        // Offered only for the one empty answer whose fix is a different type —
+        // the walk found nothing of the type asked for but did pass over other
+        // media. It is a single action, not a second list of types: it reopens the
+        // Analyze question, which is where the type is chosen, so the decision
+        // still exists in exactly one place and the panel holds no copy of it.
+        // Each action is offered only when the card above asks for it: a deeper
+        // search when the walk was cut short by the channel's limit, and a type
+        // change when the walk passed over other media. Both are outlined rather
+        // than filled, because when both apply neither is more *the* answer than
+        // the other — the card says what each would find, and this screen has no
+        // way to rank them.
+        empty?.searchDeeperLabel?.let { label ->
+            OutlinedButton(
+                onClick = onSearchDeeper,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(label)
+            }
+            Spacer(Modifier.height(4.dp))
+        }
+        if (empty?.anotherTypeMayHelp == true) {
+            OutlinedButton(
+                onClick = onChangeType,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .semantics {
+                        contentDescription =
+                            "Change file type: reopens the question that chooses it"
+                    }
+            ) {
+                Text("Change type")
+            }
+            Spacer(Modifier.height(4.dp))
+        }
         // Retrying the same type on purpose: an unfinished walk, or one that was
         // stopped, is fixed by asking again — not by changing the type.
         OutlinedButton(onClick = onRescan, modifier = Modifier.fillMaxWidth()) {
@@ -866,8 +910,11 @@ private fun ScanResultsContent(
     keepZipFiles: Boolean,
     onKeepZipFilesChange: (Boolean) -> Unit,
     onDownload: () -> Unit,
-    onDownloadZip: () -> Unit
+    onDownloadZip: () -> Unit,
+    onCancelDownload: () -> Unit,
+    onStartNewLink: () -> Unit
 ) {
+    var showFileList by rememberSaveable(sourceTitle, foundCount) { mutableStateOf(false) }
     val activeEntries = fileProgress.entries.filter { it.key in selected }
     val downloadedTotalBytes = activeEntries.sumOf { entry ->
         val progress = entry.value
@@ -892,6 +939,88 @@ private fun ScanResultsContent(
             .padding(horizontal = 16.dp)
             .semantics { paneTitle = "Scan results" }
     ) {
+        if (runState.isTerminal) {
+            StepHeading(4, "Download finished")
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "Source: $sourceTitle",
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.semantics { heading() }
+            )
+            Spacer(Modifier.height(12.dp))
+            DownloadFinishedCard(
+                message = runState.message ?: "Download finished.",
+                folder = runState.lastSavedFolder,
+                folderMessage = folderMessage,
+                onOpenFolder = onOpenFolder,
+                onDismiss = onAcknowledgeRun
+            )
+            Spacer(Modifier.height(12.dp))
+            Button(
+                onClick = onStartNewLink,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("Download another link")
+            }
+            Spacer(Modifier.height(24.dp))
+            return@Column
+        }
+
+        if (downloading) {
+            StepHeading(4, if (runState.packing) "Creating ZIP" else "Downloading")
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "Source: $sourceTitle",
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.semantics { heading() }
+            )
+            Spacer(Modifier.height(12.dp))
+            Column(
+                modifier = Modifier.semantics {
+                    liveRegion = LiveRegionMode.Polite
+                }
+            ) {
+                if (selectedBytes > 0) {
+                    val overall = (downloadedTotalBytes.toFloat() / selectedBytes).coerceIn(0f, 1f)
+                    LinearProgressIndicator(
+                        progress = { overall },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .semantics {
+                                contentDescription = "Overall download progress"
+                                progressBarRangeInfo = ProgressBarRangeInfo(overall, 0f..1f)
+                            }
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "${formatBytes(downloadedTotalBytes)} of ${formatBytes(selectedBytes)} · " +
+                            "${activeEntries.size}/${selected.size} files",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                    )
+                } else {
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "${activeEntries.size}/${selected.size} files",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                    )
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+            OutlinedButton(
+                onClick = onCancelDownload,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("Cancel download")
+            }
+            Spacer(Modifier.height(24.dp))
+            return@Column
+        }
+
+        StepHeading(3, "Choose what to download")
+        Spacer(Modifier.height(8.dp))
         Text(
             "Source: $sourceTitle",
             style = MaterialTheme.typography.titleMedium,
@@ -920,61 +1049,50 @@ private fun ScanResultsContent(
             modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }
         )
 
-        if (limitReached) {
-            // Say plainly that the list is truncated: without this, a partial
-            // scan is indistinguishable from a complete one.
-            Text(
-                "Scanning stopped at this channel's ${AppPreferences.scanLimitLabel(scanLimit)}" +
-                    "-file limit.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.tertiary
-            )
-            // The per-channel limit is raised right here, where the truncation
-            // is reported, rather than by sending the user to a global setting
-            // that would then apply to every other channel as well.
-            AppPreferences.nextScanLimit(scanLimit)?.let { next ->
-                Spacer(Modifier.height(4.dp))
-                OutlinedButton(
-                    onClick = onSearchDeeper,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text(
-                        if (next <= 0) "Search the whole channel"
-                        else "Search deeper (${AppPreferences.scanLimitLabel(next)} files)"
-                    )
+        if (stage == DownloadViewModel.SelectionStage.CHOOSE) {
+            if (limitReached) {
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "Scanning stopped at this channel's ${AppPreferences.scanLimitLabel(scanLimit)}" +
+                        "-file limit.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.tertiary
+                )
+                searchDeeperActionLabel(scanLimit)?.let { label ->
+                    Spacer(Modifier.height(4.dp))
+                    OutlinedButton(
+                        onClick = onSearchDeeper,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(label)
+                    }
                 }
             }
-        }
-        if (historyIncomplete) {
-            // Say that the list may be short, and offer the retry right here:
-            // on a large channel this is a "come back in a moment" situation,
-            // not a property of the channel.
-            Text(
-                "Telegram had not finished loading this channel's older messages, " +
-                    "so files may be missing from this list.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.tertiary
-            )
-            Spacer(Modifier.height(4.dp))
-            OutlinedButton(
-                onClick = onRescan,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text("Scan again")
+            if (historyIncomplete) {
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "Telegram had not finished loading this channel's older messages, " +
+                        "so files may be missing from this list.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.tertiary
+                )
+                Spacer(Modifier.height(4.dp))
+                OutlinedButton(
+                    onClick = onRescan,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Scan again")
+                }
             }
-        }
-        if (!historyIncomplete && otherMediaCount > 0 &&
-            stage == DownloadViewModel.SelectionStage.CHOOSE
-        ) {
-            // The scan only looked for the chosen type, so say what else is
-            // here — with the control that acts on it named, since the type is
-            // changeable from the panel the note appears in.
-            Text(
-                "This channel also has about $otherMediaCount other media file(s). " +
-                    "Choose another file type above to scan for those.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
-            )
+            if (!historyIncomplete && otherMediaCount > 0) {
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "This channel also has about $otherMediaCount other media file(s). " +
+                        "Close this panel and Analyze the link again to look for those.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                )
+            }
         }
 
         Spacer(Modifier.height(12.dp))
@@ -982,18 +1100,58 @@ private fun ScanResultsContent(
         when (stage) {
             DownloadViewModel.SelectionStage.CHOOSE -> {
                 Button(
-                    onClick = onChooseAll,
+                    onClick = {
+                        showFileList = false
+                        onChooseAll()
+                    },
                     enabled = foundCount > 0,
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text("Download all $foundCount files")
                 }
-                Spacer(Modifier.height(8.dp))
-                OutlinedButton(
-                    onClick = onChooseRange,
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    "Or download part of the list by choosing a range.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                )
+                Spacer(Modifier.height(4.dp))
+                RangeChoiceControl(
+                    totalFiles = files.size,
+                    saved = savedRange,
+                    onApply = { from, to ->
+                        showFileList = false
+                        onSelectRange(from, to)
+                    },
+                    onCustom = {
+                        showFileList = false
+                        onChooseRange()
+                    }
+                )
+                Spacer(Modifier.height(4.dp))
+                TextButton(
+                    onClick = { showFileList = !showFileList },
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text("Select a range")
+                    Text(
+                        if (showFileList) "Hide file list"
+                        else "Browse & pick individual files ($foundCount)"
+                    )
+                }
+                if (showFileList) {
+                    LazyColumn(modifier = Modifier.weight(1f, fill = false)) {
+                        items(files, key = { it.messageId }) { file ->
+                            FileRow(
+                                file = file,
+                                isSelected = file.messageId in selected,
+                                progress = fileProgress[file.messageId],
+                                downloading = downloading,
+                                failure = failures[file.messageId],
+                                onToggle = { onToggle(file.messageId) },
+                                onRetry = { onRetry(file.messageId) }
+                            )
+                        }
+                    }
                 }
             }
 
@@ -1001,175 +1159,130 @@ private fun ScanResultsContent(
                 RangeSelector(
                     totalFiles = files.size,
                     saved = savedRange,
-                    onApply = onSelectRange
+                    onApply = { from, to ->
+                        showFileList = false
+                        onSelectRange(from, to)
+                    }
                 )
                 Spacer(Modifier.height(4.dp))
                 TextButton(onClick = onBackToChoose) { Text("Back to all or range") }
             }
 
             DownloadViewModel.SelectionStage.CONFIRM -> {
-                TextButton(onClick = onBackToChoose) { Text("Change selection") }
-            }
-        }
-
-        Spacer(Modifier.height(8.dp))
-
-        if (downloading && selectedBytes > 0) {
-            val overall = (downloadedTotalBytes.toFloat() / selectedBytes).coerceIn(0f, 1f)
-            Column(
-                modifier = Modifier.semantics {
-                    liveRegion = LiveRegionMode.Polite
-                }
-            ) {
-                LinearProgressIndicator(
-                    progress = { overall },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .semantics {
-                            contentDescription = "Overall download progress"
-                            progressBarRangeInfo = ProgressBarRangeInfo(overall, 0f..1f)
-                        }
-                )
-                Spacer(Modifier.height(4.dp))
-                Text(
-                    "${formatBytes(downloadedTotalBytes)} of ${formatBytes(selectedBytes)} · " +
-                        "${activeEntries.size}/${selected.size} files",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
-                )
-                Spacer(Modifier.height(8.dp))
-            }
-        }
-
-        LazyColumn(modifier = Modifier.weight(1f, fill = false)) {
-            items(files, key = { it.messageId }) { file ->
-                FileRow(
-                    file = file,
-                    isSelected = file.messageId in selected,
-                    progress = fileProgress[file.messageId],
-                    downloading = downloading,
-                    failure = failures[file.messageId],
-                    onToggle = { onToggle(file.messageId) },
-                    onRetry = { onRetry(file.messageId) }
-                )
-            }
-        }
-
-        // The confirmation the user asked for before spending data: how many
-        // files, and how much they add up to. It only appears once a selection
-        // exists, so the download action is never reachable without a size.
-        if (selected.isNotEmpty()) {
-            Spacer(Modifier.height(8.dp))
-            Text(
-                "You have selected ${selected.size} file(s). The total download size is " +
-                    "${totalSizePhrase(selectedBytes, unknownSizeCount)}.",
-                style = MaterialTheme.typography.bodyMedium,
-                modifier = Modifier.semantics { heading() }
-            )
-            Spacer(Modifier.height(8.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Button(
-                    onClick = onDownload,
-                    enabled = !downloading,
-                    modifier = Modifier
-                        .weight(1f)
-                        .semantics {
-                            // The label says what the action is; this says how
-                            // much, which is the number that decides the tap.
-                            stateDescription = "${selected.size} file(s), " +
-                                totalSizePhrase(selectedBytes, unknownSizeCount)
-                        }
-                ) {
+                if (selected.isNotEmpty()) {
                     Text(
-                        when {
-                            runState.packing -> "Creating ZIP…"
-                            downloading -> "Downloading…"
-                            else -> "Start download"
+                        "You have selected ${selected.size} file(s). The total download size is " +
+                            "${totalSizePhrase(selectedBytes, unknownSizeCount)}.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.semantics { heading() }
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Button(
+                            onClick = onDownload,
+                            modifier = Modifier
+                                .weight(1f)
+                                .semantics {
+                                    stateDescription = "${selected.size} file(s), " +
+                                        totalSizePhrase(selectedBytes, unknownSizeCount)
+                                }
+                        ) {
+                            Text("Start download")
                         }
-                    )
-                }
-                // Beside Start download, because it is the same selection taken
-                // a different way — not a separate thing to configure.
-                OutlinedButton(
-                    onClick = onDownloadZip,
-                    enabled = !downloading,
-                    modifier = Modifier.semantics {
-                        contentDescription = "Download ZIP. Saves the selected " +
-                            "${selected.size} file(s), " +
-                            "${totalSizePhrase(selectedBytes, unknownSizeCount)}, " +
-                            "as one zip archive."
+                        OutlinedButton(
+                            onClick = onDownloadZip,
+                            modifier = Modifier.semantics {
+                                contentDescription = "Download ZIP. Saves the selected " +
+                                    "${selected.size} file(s), " +
+                                    "${totalSizePhrase(selectedBytes, unknownSizeCount)}, " +
+                                    "as one zip archive."
+                            }
+                        ) {
+                            Text("Download ZIP")
+                        }
                     }
-                ) {
-                    Text("Download ZIP")
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        if (keepZipFiles) {
+                            "Download ZIP saves the same ${selected.size} file(s) as one .zip " +
+                                "archive in the channel's folder, and keeps the separate files too."
+                        } else {
+                            "Download ZIP saves the same ${selected.size} file(s) as one .zip " +
+                                "archive in the channel's folder, instead of as separate files."
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .toggleable(
+                                value = keepZipFiles,
+                                role = Role.Checkbox,
+                                onValueChange = onKeepZipFilesChange
+                            )
+                            .semantics {
+                                contentDescription = "Also keep the separate files"
+                                stateDescription = if (keepZipFiles) "Kept" else "Not kept"
+                            }
+                            .padding(vertical = 4.dp)
+                    ) {
+                        Checkbox(
+                            checked = keepZipFiles,
+                            onCheckedChange = null,
+                            modifier = Modifier.clearAndSetSemantics { }
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            "Also keep the separate files",
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    }
+                    Spacer(Modifier.height(4.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        TextButton(
+                            onClick = {
+                                showFileList = false
+                                onBackToChoose()
+                            }
+                        ) {
+                            Text("Change selection")
+                        }
+                        TextButton(onClick = { showFileList = !showFileList }) {
+                            Text(
+                                if (showFileList) "Hide selected files"
+                                else "Review files (${selected.size})"
+                            )
+                        }
+                    }
+                    if (showFileList) {
+                        LazyColumn(modifier = Modifier.weight(1f, fill = false)) {
+                            items(files.filter { it.messageId in selected }, key = { it.messageId }) { file ->
+                                FileRow(
+                                    file = file,
+                                    isSelected = true,
+                                    progress = fileProgress[file.messageId],
+                                    downloading = downloading,
+                                    failure = failures[file.messageId],
+                                    onToggle = { onToggle(file.messageId) },
+                                    onRetry = { onRetry(file.messageId) }
+                                )
+                            }
+                        }
+                    }
                 }
             }
-            Spacer(Modifier.height(6.dp))
-            // The sentence follows the checkbox, so what the next tap will do is
-            // never ambiguous — including whether the files are kept as well.
-            Text(
-                if (keepZipFiles) {
-                    "Download ZIP saves the same ${selected.size} file(s) as one .zip " +
-                        "archive in the channel's folder, and keeps the separate files too."
-                } else {
-                    "Download ZIP saves the same ${selected.size} file(s) as one .zip " +
-                        "archive in the channel's folder, instead of as separate files."
-                },
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
-            )
-            Spacer(Modifier.height(4.dp))
-            // Beside the action it modifies, rather than in Settings: it is a
-            // choice about this button, and a screen reader announces the state
-            // as part of the option itself.
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .toggleable(
-                        value = keepZipFiles,
-                        role = Role.Checkbox,
-                        onValueChange = onKeepZipFilesChange
-                    )
-                    .semantics {
-                        contentDescription = "Also keep the separate files"
-                        stateDescription = if (keepZipFiles) "Kept" else "Not kept"
-                    }
-                    .padding(vertical = 4.dp)
-            ) {
-                Checkbox(
-                    checked = keepZipFiles,
-                    onCheckedChange = null,
-                    modifier = Modifier.clearAndSetSemantics { }
-                )
-                Spacer(Modifier.width(8.dp))
-                Text(
-                    "Also keep the separate files",
-                    style = MaterialTheme.typography.bodyMedium
-                )
-            }
-            Spacer(Modifier.height(16.dp))
-
-            // The sheet stays open over Home while the batch runs, so this is
-            // where the files are reported when it ends — the user is already
-            // looking at it, and would otherwise have to dismiss the sheet to
-            // find out where everything went.
-            if (runState.isTerminal) {
-                Spacer(Modifier.height(12.dp))
-                DownloadFinishedCard(
-                    message = runState.message ?: "Download finished.",
-                    folder = runState.lastSavedFolder,
-                    folderMessage = folderMessage,
-                    onOpenFolder = onOpenFolder,
-                    onDismiss = onAcknowledgeRun
-                )
-            }
-        } else {
-            Spacer(Modifier.height(24.dp))
         }
+        Spacer(Modifier.height(16.dp))
     }
 }
 
@@ -1181,6 +1294,11 @@ private fun ScanResultsContent(
  * first and last number, with no scrolling at all. The numbering matches the
  * positions in the list, and the fields reset when a new result set arrives so
  * they can never refer to a list that is no longer on screen.
+ *
+ * Only the typed range lives here now. The one-tap presets moved into
+ * [RangeChoiceControl], where choosing "Newest 20" is one entry in a list of
+ * ranges rather than a button that had to be told apart from the fields below
+ * it.
  */
 @Composable
 private fun RangeSelector(
@@ -1199,7 +1317,7 @@ private fun RangeSelector(
     var to by rememberSaveable(totalFiles) { mutableStateOf(seed.to.toString()) }
 
     Text(
-        "Select a range",
+        "Custom range",
         style = MaterialTheme.typography.titleSmall,
         modifier = Modifier.semantics { heading() }
     )
@@ -1210,30 +1328,6 @@ private fun RangeSelector(
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
     )
-    Spacer(Modifier.height(8.dp))
-
-    // One-tap presets for the common "just give me the newest few" case.
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .horizontalScroll(rememberScrollState()),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        for (preset in AppPreferences.RANGE_PRESETS) {
-            // Disabled rather than clamped: a button labelled "Newest 100" that
-            // silently selected 20 would be lying about what it does.
-            OutlinedButton(
-                onClick = {
-                    from = "1"
-                    to = preset.toString()
-                    onApply(1, preset)
-                },
-                enabled = preset <= totalFiles
-            ) {
-                Text("Newest $preset")
-            }
-        }
-    }
     Spacer(Modifier.height(8.dp))
 
     Row(
@@ -1268,6 +1362,100 @@ private fun RangeSelector(
         modifier = Modifier.fillMaxWidth()
     ) {
         Text("Select files $from to $to")
+    }
+}
+
+/**
+ * The range, as a single combobox.
+ *
+ * The range used to be a row of preset buttons, two number fields and a third
+ * button to apply what was typed — four controls for one decision, "how much of
+ * this list do I want?". The presets are now the combobox's entries, and the
+ * fields appear only for "Custom range…", which is the one entry that needs them.
+ *
+ * Presets that do not fit the list are disabled rather than clamped: an entry
+ * reading "Newest 100 files" that silently selected 20 would be lying about what
+ * it does, which is the rule the button row already followed.
+ *
+ * Accessibility: the anchor replaces its own read-only field semantics with one
+ * description that carries the range currently in force, plus a label for what
+ * opening it does. Without that, the field would announce as something the user
+ * could type into, and a screen reader user would be told the value but not that
+ * it is a list of choices. The pointer handling that opens the menu on a tap is
+ * a modifier rather than a semantics action, so replacing the semantics leaves
+ * touch and TalkBack activation both working. The entry matching the current
+ * range is marked selected, so opening the list says where the user already is.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun RangeChoiceControl(
+    totalFiles: Int,
+    saved: SavedRange,
+    onApply: (Int, Int) -> Unit,
+    onCustom: () -> Unit
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val current = rangeChoiceLabel(saved, totalFiles)
+    // The preset's own wording, so the entry and the value it becomes read the
+    // same: see [rangeChoiceLabel].
+    val presetLabel: (Int) -> String = { preset -> "Newest $preset files" }
+
+    ExposedDropdownMenuBox(
+        expanded = expanded,
+        onExpandedChange = { expanded = it },
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        OutlinedTextField(
+            value = current,
+            onValueChange = {},
+            readOnly = true,
+            singleLine = true,
+            label = { Text("Range") },
+            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+            modifier = Modifier
+                // The typed overload: a read-only combobox is exactly what
+                // PrimaryNotEditable describes, and the no-argument overload is
+                // deprecated — which this project's warning-free build treats as
+                // a failure.
+                .menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable, enabled = true)
+                .fillMaxWidth()
+                .clearAndSetSemantics {
+                    contentDescription = "Range of files to download"
+                    stateDescription = current
+                    role = Role.Button
+                    onClick(label = "Open the range options") {
+                        expanded = true
+                        true
+                    }
+                }
+        )
+        ExposedDropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+            modifier = Modifier.exposedDropdownSize()
+        ) {
+            for (preset in AppPreferences.RANGE_PRESETS) {
+                val fits = preset <= totalFiles
+                DropdownMenuItem(
+                    text = { Text(presetLabel(preset)) },
+                    onClick = {
+                        expanded = false
+                        onApply(1, preset)
+                    },
+                    enabled = fits,
+                    modifier = Modifier.semantics {
+                        selected = fits && current == presetLabel(preset)
+                    }
+                )
+            }
+            DropdownMenuItem(
+                text = { Text("Custom range…") },
+                onClick = {
+                    expanded = false
+                    onCustom()
+                }
+            )
+        }
     }
 }
 

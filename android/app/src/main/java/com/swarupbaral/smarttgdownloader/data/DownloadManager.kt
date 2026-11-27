@@ -315,6 +315,7 @@ object DownloadManager {
         // Cancel means stop for the archive too: leaving the request behind
         // would rebuild it on the next launch.
         DownloadQueueStore.clearZipRequest(context.applicationContext)
+        _pendingIds.value = emptySet()
         job?.cancel()
     }
 
@@ -463,6 +464,7 @@ object DownloadManager {
             } else {
                 null
             }
+            if (epoch != runEpoch.get()) return
             if (archive != null) {
                 completed += archive.packed
                 failed += archive.failed

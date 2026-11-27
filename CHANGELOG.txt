@@ -1,17 +1,38 @@
-SmartTG Downloader Changelog
+﻿SmartTG Downloader Changelog
 ========================================================================
-Version: 2.2.0 / 8.8.0
-Build/Version Code: 6 / 8.8.0 (Android 2.2.0 / Windows 8.8.0)
-Release Date: September 13, 2026
+Version: 2.2.0 / 8.9.0
+Build/Version Code: 6 / 8.9.0 (Android 2.2.0 / Windows 8.9.0)
+Release Date: November 27, 2026
 ========================================================================
 
 SUMMARY OF CHANGES:
-Android 2.2.0 keeps downloads running after you leave the app, lets a channel
-holding tens of thousands of files be narrowed to the ones you actually want
-before anything is fetched, and fixes a history-walk bug that made large
-channels look empty. Windows is unchanged at 8.8.0.
+Android 2.2.0 keeps downloads running after you leave the app, uses a strict
+step-by-step download flow that hides finished steps, moves default file-type
+filtering into Settings -> Analysis, and fixes large-channel scanning and
+download cancellation edge cases. Windows 8.9.0 adds remembered/configurable
+default filters, scan-mode progress controls, non-blocking update prompts, and
+folder/file classification fixes.
 
 [ADDED]
+- Android: Settings -> Analysis now includes a Default file type selector (All /
+  Audio / Video / Images / Docs), alongside "Ask which type before analyzing"
+  and the default scan limit.
+- Android: Home and the results sheet now follow a strict progressive flow:
+  Step 1 (link input) and Step 2 (Analyze) collapse once a scan/download starts
+  (with a "Change link" action), the results sheet keeps the file list collapsed
+  by default behind a toggle, and each stage (Choose -> Range -> Confirm ->
+  Downloading -> Finished) hides earlier controls and adds an in-app "Cancel
+  download" action.
+- Windows (8.9.0): added Default Content Filters, "Ask which filters before
+  analyzing", and "Check for Updates" to Settings -> General; remembered filter
+  selections across scans; and added live scan progress updates in the dialog
+  (with Pause hidden during scanning).
+- Windows (8.9.0): fixed photo/voice-note subfolder routing, sanitized Windows
+  reserved channel folder names and trailing dots, fixed proxy validation
+  blocking Settings saves when proxy is disabled, prevented the OTP resend timer
+  from ticking after login, cleaned up 0-byte orphan files on aborted downloads,
+  and replaced the update prompt's "Exit" action with "Later".
+
 - Android: downloads now run in a foreground service with a progress
   notification, so a batch continues after leaving the app. The pending queue
   is persisted and resumes after a process restart, and TDLib's own cache
@@ -25,12 +46,21 @@ channels look empty. Windows is unchanged at 8.8.0.
 - Android: range selection in the results panel by file number, plus Newest
   10/20/50/100 presets; the last applied range is remembered per channel.
 - Android: a scan limit per channel (100 / 500 / 1,000 / 5,000 / All), with a
-  Search deeper step offered where a truncated scan is reported.
+  Search deeper step offered both where a truncated scan is reported in the
+  results list and in the empty state, labelled with the limit it will raise to
+  ("Search deeper (1,000 files)", or "Search the whole channel" at the last
+  step) so the cost of the next scan is on the button. A channel's own limit can
+  also be set from its row in Settings - Channels, which is the only way in for a
+  channel that has never been analyzed; the dialog offers the whole ladder, and
+  offers a limit that is not on it alongside the steps rather than hiding it.
 - Android: download connection choice (any connection, or Wi-Fi only), enforced
   before every download including retries.
 - Android: OTP resend on Telegram's own escalating cooldown (30s / 50s / 60s).
 - Android: unit tests (JUnit 4, JVM) for the preference precedence, range
-  seeding and scan-limit escalation rules, and for the history paging policy.
+  seeding and scan-limit escalation rules, for the history paging policy, and for
+  the range combobox's label rule - the unset-range sentinel, an empty list, a
+  remembered range clamped onto a smaller list, and the singular wording for a
+  one-file range.
 - Android: a folder per channel in Download/SmartTG Downloader/<channel>/, plus
   an Open Downloads folder action when a batch finishes - on Home, in the
   results panel, in History, and on the completion notification. A channel's
@@ -68,19 +98,46 @@ channels look empty. Windows is unchanged at 8.8.0.
   scans for it straight away, with the step naming the type it is using and a
   Change type action beside the button. The question comes back by unticking the
   box or from the new "Ask which type before analyzing" switch in Settings, which
-  sits under Default filter because that value is what a skipped question uses.
-  A remembered type this build does not recognise falls back to All rather than
-  being handed to the scan, where it would match nothing and report an empty
-  channel for what is really a stale setting.
-- Android: the results panel can change the file type and scan again on the spot,
-  with the same All/Audio/Video/Images/Docs set as everywhere else, instead of
-  sending the user back to the link field to rescan. The panel stays open across
-  that rescan, says which type it is scanning for, offers Stop scanning, and keeps
-  the control available when a scan comes back empty - the case where trying
-  another type matters most. The type chosen is remembered as the default filter,
-  without touching the "ask before analyzing" preference, and the chips are held
-  closed while a download is running so the per-file progress cannot be cleared
-  out from under the user.
+  sits beside the sentence naming the type a skipped question will use, so the
+  answer is both visible and reversible. A remembered type this build does not
+  recognise falls back to All rather than being handed to the scan, where it
+  would match nothing and report an empty channel for what is really a stale
+  setting.
+- Android: a menu on every screen after sign-in, listing the whole app - Home and
+  History first, then each Settings group as its own entry - so any part of the
+  app is one tap away from anywhere, with Sign out as its last entry below a
+  divider. The drawer names itself with a pane title
+  for screen readers, its rows carry labels instead of described icons, and it is
+  disabled on the intro and login screens, where there is nothing behind it to
+  navigate to. The group a Settings screen is showing is held by the shell, so
+  the menu cannot mark the wrong entry as current, and Settings keeps a single
+  back-stack entry whichever group it shows.
+- Android: Settings is split into six groups - Account, Appearance, Analysis,
+  Downloads, Channels, Updates - shown one at a time behind a row of section
+  chips, instead of one long column that could only be read by scrolling through
+  it. Each group opens with its own heading and a line saying what it covers, the
+  heading is announced when a group is chosen, and the section chips are spoken
+  as tabs rather than as radio choices, since they switch the content below them.
+- Android: unit tests for the Settings section lookup - each key opening its own
+  group, an unknown, missing or blank key falling back to the default, whitespace
+  tolerance, and the invariants the keys themselves have to keep (unique,
+  non-blank, no spaces, and a default that is a real section) - and for the rule
+  that decides when an empty scan is one a different file type could fix, and for
+  the rule that words and gates the deeper-search action - each ladder step naming
+  the next limit rather than the one in force, the last step promising no number,
+  and no action at all once the ladder has run out; and for setting one channel's
+  limit - which limits a channel is offered, including one that is not on the
+  ladder, how each choice reads, that the limit in force is always among them, and
+  that re-choosing it writes nothing and leaves the channel's last-used stamp
+  untouched so its row cannot move while it is being edited.
+- Android: the results panel's empty state offers one Change type action when a
+  scan found nothing of the type asked for but the walk did pass over other media.
+  It reopens the Analyze question rather than showing a list of types in the
+  panel, so the type is still chosen in one place and the panel holds no second
+  copy of it; it is offered only when a type change could find something, so an
+  All scan never suggests one. A walk cut short by the channel's scan limit gets
+  a Search deeper action in the same place, so the empty card's advice names a
+  control that is actually on the screen.
 
 [CHANGED]
 - Android: the permission screen is gone. Downloads are published through
@@ -92,17 +149,52 @@ channels look empty. Windows is unchanged at 8.8.0.
   there are left where they are.
 - Android: analysis scans only the file type you choose, and which type that is
   is asked in a dialog when Analyze is pressed: All / Audio / Video / Images /
-  Docs, the same set Settings offers, with All meaning every file in the link.
-  The scan then looks for that type alone, so a large channel is no longer
-  trawled for media nobody asked for.
+  Docs, the same set History's filter uses, with All meaning every file in the
+  link. The scan then looks for that type alone, so a large channel is no longer
+  trawled for media nobody asked for. That question is also the only place the
+  type is set: the results panel has no type control, so a scan is never re-typed
+  from the list it just produced, and with the question turned off Change type
+  beside the Analyze button is what reopens it.
 - Android: the results panel states what it found and asks what to take
   ("N files found - download all, or select a range?"), then shows the selected
   count and total download size before Start download.
-- Android: one filter list everywhere, the one Settings offers; History no
-  longer adds a chip per channel.
+- Android: one filter list everywhere, so no screen invents a type the others do
+  not know about; History no longer adds a chip per channel.
 - Android: the debug APK no longer ships emulator or 32-bit x86 natives and
   stores its ARM natives compressed - 81.2 MB before, about 38 MB now, or
   ~22.9 MB with -PminifyDebug=true. Still a single universal APK, not split.
+- Android: the download panel's range selection is now one combobox - Newest 10 /
+  20 / 50 / 100 files, or Custom range... for a first and last file number - in
+  place of preset buttons, two number fields and a separate apply button. The
+  control names the range currently in force, clamped onto the list on screen by
+  the same rule the fields pre-fill from, so the value it shows and the range it
+  gives cannot disagree. A preset larger than the list is disabled rather than
+  silently clamped, so an entry never claims more than it does.
+- Android: the light and dark schemes now set the container roles explicitly
+  (surfaceVariant, surfaceContainer*, onSurfaceVariant, outlineVariant). Only
+  background and surface were set before, so everything drawn in a container tone
+  - filled cards, menus, the bottom sheet - fell back to the stock neutral greys
+  and sat on the navy background looking like they came from a different app.
+  Material You still overrides the whole scheme when Use wallpaper colors is on.
+- Android: logging out now asks first, naming what is kept (downloads and
+  history) and what is needed to sign back in, instead of ending the session on
+  the first tap of a button in a scrolling list. It also moved: Sign out is the
+  last entry in the menu, reachable from every screen, with the one confirmation
+  dialog behind it and the Account group left informational. The login screen now
+  replaces the app's screens on the back stack rather than stacking on top of
+  them, so Back after signing out leaves the app instead of returning to a Home
+  screen whose Telegram calls can only fail. Forgetting every channel's
+  preferences is coloured as the destructive action it is, matching Clear
+  history - both remove something the user cannot get back, and only one of them
+  looked like it.
+- Android: one app name and one content margin. The app is Smart TG Downloader
+  everywhere it names itself; Home said "TG Downloader", and History's heading
+  said "Download history" while its tab and menu entry said "History". Home,
+  History and Settings now share a 16dp content margin (Home had 24dp, which read
+  as one of the three being wrong rather than as a deliberate difference),
+  buttons that stand alone are full width, the bottom bar's icons are no longer
+  described on top of their own labels, and the results sheet is numbered as the
+  third step of the flow its headings describe.
 
 [FIXED]
 - Android: a large channel could report zero files, or a single file. The
